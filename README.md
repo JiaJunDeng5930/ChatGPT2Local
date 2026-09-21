@@ -40,6 +40,8 @@ Full harness mode connects ChatGPT to the current task’s files, terminal, tool
 4. **For coding with tools**, open **MCP** in the launcher and complete the Full harness setup below.
 
 The app includes its browser and runtime. No separate Chrome, Node, or Bun installation is needed.
+On macOS in automatic browser mode, choose **Import from local Chrome** to reuse an existing
+ChatGPT sign-in. Select a Chrome profile when prompted; macOS may ask for Keychain access.
 
 <details>
 <summary><strong>Terminal install, updates & repair</strong></summary>

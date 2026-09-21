@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   copyManualPrompt: (tabId) => ipcRenderer.invoke("launcher:manual-prompt-copy", tabId),
   confirmManualSent: (tabId) => ipcRenderer.invoke("launcher:manual-prompt-sent", tabId),
   openLogin: () => ipcRenderer.invoke("launcher:browser-login"),
+  listChromeProfiles: () => ipcRenderer.invoke("launcher:chrome-cookie-profiles"),
+  importChromeCookies: profileId => ipcRenderer.invoke("launcher:chrome-cookie-import", profileId),
   openPasskeyLogin: () => ipcRenderer.invoke("launcher:browser-passkey-login"),
   continuePasskeyLogin: () => ipcRenderer.invoke("launcher:browser-passkey-login-continue"),
   logoutChatGpt: () => ipcRenderer.invoke("launcher:browser-logout"),

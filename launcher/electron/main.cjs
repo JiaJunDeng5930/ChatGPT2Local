@@ -585,6 +585,22 @@ function registerIpc({ logger, stateStore }) {
     }
     return browser;
   });
+  handle("launcher:chrome-cookie-profiles", async () => {
+    if (process.platform !== "darwin") throw new Error("Chrome cookie import is supported only on macOS");
+    if (stateStore.read().browserInteractionMode !== "automatic") {
+      throw new Error("Chrome cookie import requires automatic browser mode");
+    }
+    return await require("./chrome-cookie-import.cjs").listChromeProfiles();
+  });
+  handle("launcher:chrome-cookie-import", async (_event, profileId) => {
+    if (typeof profileId !== "string") throw new Error("Chrome profile ID must be a string");
+    const browser = await browserHost.importChromeCookies(profileId);
+    if (browser.authenticated) {
+      const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+      send("launcher:state-changed", state);
+    }
+    return browser;
+  });
   handle("launcher:browser-passkey-login-continue", () => runtimeHost.continuePasskeyLogin());
   handle("launcher:browser-logout", async () => {
     const browser = await browserHost.logout();

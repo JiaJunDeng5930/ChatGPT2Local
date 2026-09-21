@@ -2715,3 +2715,21 @@ code {
     transition-duration: 0.01ms !important;
   }
 }
+
+.chrome-profile-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.chrome-profile-picker select {
+  max-width: 240px;
+  padding: 6px 8px;
+  color: inherit;
+  background: var(--color-bg-secondary, #242424);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}

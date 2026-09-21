@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { validatePasskeyLoginState } = require("../electron/passkey-login-state.cjs");
+const { validateSessionLoginState } = require("../electron/session-login-state.cjs");
 
 function cookie(name, domain, extra = {}) {
   return {
@@ -16,8 +16,8 @@ function cookie(name, domain, extra = {}) {
   };
 }
 
-test("passkey transfer retains only portable ChatGPT/OpenAI state", () => {
-  const state = validatePasskeyLoginState({
+test("session transfer retains only portable ChatGPT/OpenAI state", () => {
+  const state = validateSessionLoginState({
     cookies: [
       cookie("chatgpt", ".chatgpt.com"),
       cookie("openai", "auth.openai.com"),
@@ -40,19 +40,19 @@ test("passkey transfer retains only portable ChatGPT/OpenAI state", () => {
   assert.deepEqual(state.localStorage, [{ name: "chat", value: "kept" }]);
 });
 
-test("passkey transfer fails closed without an allowed session cookie", () => {
-  assert.throws(() => validatePasskeyLoginState({
+test("session transfer fails closed without an allowed session cookie", () => {
+  assert.throws(() => validateSessionLoginState({
     cookies: [cookie("google", ".accounts.google.com")],
     origins: [],
   }), /no ChatGPT\/OpenAI cookies/);
 });
 
-test("passkey transfer rejects malformed allowed-domain cookie fields", () => {
-  assert.throws(() => validatePasskeyLoginState({
+test("session transfer rejects malformed allowed-domain cookie fields", () => {
+  assert.throws(() => validateSessionLoginState({
     cookies: [cookie("broken", ".chatgpt.com", { path: "relative" })],
     origins: [],
   }), /invalid cookie path/);
-  assert.throws(() => validatePasskeyLoginState({
+  assert.throws(() => validateSessionLoginState({
     cookies: [cookie("broken", ".chatgpt.com", { sameSite: "Unknown" })],
     origins: [],
   }), /invalid cookie SameSite/);

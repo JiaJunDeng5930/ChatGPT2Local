@@ -10,7 +10,7 @@ const {
 } = require("./browser-helper-verifier.cjs");
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
-const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
+const { validateSessionLoginState } = require("./session-login-state.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
   shouldBlockSleepForTurns,
@@ -2480,7 +2480,7 @@ class BrowserHost {
         });
         this.logger.info("browser.passkey_login_started");
         const transfer = await this.loginWithPasskey();
-        return await this.installPasskeyLogin(transfer);
+        return await this.installSessionLogin(transfer);
       });
     })();
     const tracked = operation.finally(() => {
@@ -2490,7 +2490,19 @@ class BrowserHost {
     return tracked;
   }
 
-  async clearOwnedSessionForPasskey() {
+  async importChromeCookies(profileId) {
+    requireAutomaticBrowserInspection(this, "Chrome cookie import");
+    if (process.platform !== "darwin") throw new Error("Chrome cookie import is supported only on macOS");
+    if (this.loginOperation) throw new Error("ChatGPT login is already in progress");
+    return await this.withManualOperation("Chrome cookie import", async () => {
+      const { readChromeCookies } = require("./chrome-cookie-import.cjs");
+      // Read and validate before replacing the owned session; keychain denial must not sign out.
+      const storageState = await readChromeCookies(profileId);
+      return await this.installSessionLogin({ storageState, cleanup: async () => {} }, "chrome");
+    });
+  }
+
+  async clearOwnedSessionForImport() {
     if (!(this.turnTabs instanceof Map)) throw new Error("Owned ChatGPT tab registry is unavailable");
     if (this.authView) this.closeAuthView(this.authView, true, false);
     const tabs = [...this.turnTabs.values()];
@@ -2509,31 +2521,39 @@ class BrowserHost {
     for (const tab of tabs) this.removeTurnTab(tab, false);
   }
 
-  async resetFailedPasskeyLogin() {
-    await this.clearOwnedSessionForPasskey();
+  async resetFailedSessionLogin() {
+    await this.clearOwnedSessionForImport();
     const contents = this.view.webContents;
     await contents.loadURL(TEMPORARY_CHAT_URL);
     const browser = await this.probeAuthentication();
-    if (browser.authenticated) throw new Error("Partial passkey session remained authenticated after cleanup");
+    if (browser.authenticated) throw new Error("Partial imported session remained authenticated after cleanup");
     this.setState({ authenticated: false, loading: false, status: "signed-out", message: "Sign in to ChatGPT" });
   }
 
-  async installPasskeyLogin(transfer) {
+  async installSessionLogin(transfer, source = "passkey") {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT session import");
     if (!transfer || typeof transfer !== "object" || typeof transfer.cleanup !== "function") {
-      throw new Error("Passkey sign-in returned an invalid transfer handle");
+      throw new Error("Session import returned an invalid transfer handle");
     }
     let error = null;
     let result = null;
     let sessionMutated = false;
     let sessionDiscarded = false;
+    let previousSession = null;
     let state;
     try {
-      state = validatePasskeyLoginState(transfer.storageState);
+      state = validateSessionLoginState(transfer.storageState);
       const contents = this.view?.webContents;
       if (!contents || contents.isDestroyed()) throw new Error("Owned ChatGPT browser session is unavailable");
+      if (source === "chrome") {
+        previousSession = {
+          cookies: await contents.session.cookies.get({}),
+          localStorage: await contents.executeJavaScript(`location.origin === ${JSON.stringify(CHATGPT_ORIGIN)}
+            ? Object.entries(localStorage).map(([name, value]) => ({ name, value })) : []`, true),
+        };
+      }
       sessionMutated = true;
-      await this.clearOwnedSessionForPasskey();
+      await this.clearOwnedSessionForImport();
       for (const cookie of state.cookies) await contents.session.cookies.set(cookie);
       contents.session.flushStorageData();
       await contents.session.cookies.flushStore();
@@ -2542,46 +2562,72 @@ class BrowserHost {
         const entries = javaScriptLiteral(state.localStorage);
         await contents.executeJavaScript(`(() => {
           if (location.origin !== ${JSON.stringify(CHATGPT_ORIGIN)}) {
-            throw new Error("Passkey storage import reached an unexpected origin");
+            throw new Error("Session storage import reached an unexpected origin");
           }
           for (const entry of ${entries}) localStorage.setItem(entry.name, entry.value);
         })()`, true);
         await contents.loadURL(TEMPORARY_CHAT_URL);
       }
       result = await this.waitForAuthenticated(60_000);
+      if (!result?.authenticated) throw new Error("Session import did not authenticate the Launcher session");
       await this.runSessionInspection(false);
       this.activateHomeSurface();
       this.show();
-      this.logger.info("browser.passkey_login_imported");
+      this.logger.info(source === "chrome" ? "browser.chrome_cookie_login_imported" : "browser.passkey_login_imported");
     } catch (caught) {
       error = caught;
     }
 
     if (error && sessionMutated) {
       try {
-        await this.resetFailedPasskeyLogin();
+        await this.resetFailedSessionLogin();
         sessionDiscarded = true;
       } catch (cleanupError) {
-        error = combinedError(error, "clearing the partial passkey session failed", cleanupError);
+        error = combinedError(error, "clearing the partial imported session failed", cleanupError);
       }
     }
     try {
       await transfer.cleanup();
     } catch (cleanupError) {
       error = error
-        ? combinedError(error, "removing temporary passkey state failed", cleanupError)
-        : new Error(`Removing temporary passkey state failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+        ? combinedError(error, "removing temporary imported state failed", cleanupError)
+        : new Error(`Removing temporary imported state failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
     }
     if (error && sessionMutated && !sessionDiscarded) {
       try {
-        await this.resetFailedPasskeyLogin();
+        await this.resetFailedSessionLogin();
         sessionDiscarded = true;
       } catch (cleanupError) {
-        error = combinedError(error, "retrying partial passkey session cleanup failed", cleanupError);
+        error = combinedError(error, "retrying partial imported session cleanup failed", cleanupError);
+      }
+    }
+    if (error && sessionMutated && previousSession) {
+      try {
+        await this.clearOwnedSessionForImport();
+        const contents = this.view.webContents;
+        for (const cookie of previousSession.cookies) {
+          const { hostOnly, ...details } = cookie;
+          delete details.session;
+          const url = `https://${cookie.domain.replace(/^\./, "")}${cookie.path}`;
+          if (hostOnly) delete details.domain;
+          await contents.session.cookies.set({ ...details, url });
+        }
+        await contents.session.cookies.flushStore();
+        await contents.loadURL(TEMPORARY_CHAT_URL);
+        if (previousSession.localStorage.length) {
+          await contents.executeJavaScript(`(() => {
+            if (location.origin !== ${JSON.stringify(CHATGPT_ORIGIN)}) throw new Error("Session restore reached an unexpected origin");
+            for (const entry of ${javaScriptLiteral(previousSession.localStorage)}) localStorage.setItem(entry.name, entry.value);
+          })()`, true);
+          await contents.loadURL(TEMPORARY_CHAT_URL);
+        }
+        await this.probeAuthentication();
+      } catch (restoreError) {
+        error = combinedError(error, "restoring the previous ChatGPT session failed", restoreError);
       }
     }
     if (error) throw error;
-    if (!result?.authenticated) throw new Error("Passkey sign-in completed without an authenticated Launcher session");
+    if (!result?.authenticated) throw new Error("Session import completed without an authenticated Launcher session");
     return this.snapshot();
   }
 

@@ -94,8 +94,13 @@ The launcher keeps ChatGPT login, identity-provider navigation, and model turns 
 Electron partition. Allowed login popups are adopted into an in-launcher `WebContentsView` that
 shares that partition; unrelated external links remain outside it. A visible composer alone is not
 authentication evidence: the launcher also requires a valid server session and an exact Temporary
-Chat URL before setup can continue. No cookies, local storage, or browser profile are copied from an
-external browser.
+Chat URL before setup can continue. On macOS in automatic browser mode, users can explicitly import ChatGPT cookies from a local
+Chrome profile. The main process reads only the selected profile's relevant cookies, decrypts them
+using macOS Keychain, and validates the imported session in the private Electron partition. Cookie
+values and the Keychain secret never cross renderer IPC or enter logs. Read or validation failures
+before replacement leave the existing session intact; failures after replacement clear the partial
+import and attempt to restore the previous cookies and ChatGPT local storage. This does not back up
+all Chromium storage. The separate passkey flow uses a dedicated temporary Chrome profile.
 
 ### Cross-turn data leakage
 

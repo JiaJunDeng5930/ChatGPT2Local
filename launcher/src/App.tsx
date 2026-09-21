@@ -815,6 +815,9 @@ function BrowserSurface({
   platform: string;
   setError: (error: string | null) => void;
 }) {
+  const [chromeImportBusy, setChromeImportBusy] = useState(false);
+  const [chromeProfiles, setChromeProfiles] = useState<Array<{ id: string; name: string }>>([]);
+  const [chromeProfileId, setChromeProfileId] = useState("");
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
   const visible = browser?.visible === true;
   const manualInteraction = interactionMode === "manual";
@@ -866,8 +869,38 @@ function BrowserSurface({
       setError(messageOf(cause));
     }
   };
+  const importChromeProfile = async (profileId: string) => {
+    setChromeImportBusy(true);
+    setError(null);
+    try {
+      await api!.importChromeCookies(profileId);
+      setChromeProfiles([]);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setChromeImportBusy(false);
+    }
+  };
+  const openChromeImport = async () => {
+    if (chromeImportBusy || operation?.status === "running" || navigationLocked) return;
+    setChromeImportBusy(true);
+    setError(null);
+    try {
+      const profiles = await api!.listChromeProfiles();
+      if (profiles.length === 0) throw new Error(copy.chromeNoProfiles);
+      if (profiles.length === 1) await importChromeProfile(profiles[0].id);
+      else {
+        setChromeProfiles(profiles);
+        setChromeProfileId(profiles[0].id);
+      }
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setChromeImportBusy(false);
+    }
+  };
   const openPasskeyLogin = () => {
-    if (operation?.status === "running") return;
+    if (chromeImportBusy || operation?.status === "running") return;
     setError(null);
     void api!.openPasskeyLogin().catch(cause => setError(messageOf(cause)));
   };
@@ -966,7 +999,7 @@ function BrowserSurface({
         {passkeyAvailable ? (
           <button
             className="toolbar-text-button"
-            disabled={passkeyWaiting && passkeyContinuationRequested}
+            disabled={chromeImportBusy || (passkeyWaiting && passkeyContinuationRequested)}
             onClick={() => void (passkeyWaiting ? continuePasskeyLogin() : openPasskeyLogin())}
             type="button"
           >
@@ -975,11 +1008,32 @@ function BrowserSurface({
               : copy.passkeySignIn}
           </button>
         ) : null}
+        {passkeyAvailable ? (
+          <button className="toolbar-text-button" type="button"
+            disabled={chromeImportBusy || operation?.status === "running" || navigationLocked}
+            onClick={() => void openChromeImport()}>
+            {chromeImportBusy ? copy.chromeImporting : copy.chromeImport}
+          </button>
+        ) : null}
         <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
           {visible ? copy.hideBrowser : copy.openChatgpt}
         </button>
         {browser?.loading ? <i className="browser-loading-line" /> : null}
       </div>
+      {passkeyAvailable && chromeProfiles.length > 1 ? (
+        <div className="chrome-profile-picker">
+          <label htmlFor="chrome-profile">{copy.chromeProfile}</label>
+          <select id="chrome-profile" value={chromeProfileId} disabled={chromeImportBusy}
+            onChange={event => setChromeProfileId(event.target.value)}>
+            {chromeProfiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+          </select>
+          <SecondaryButton disabled={chromeImportBusy || operation?.status === "running" || navigationLocked}
+            onClick={() => void importChromeProfile(chromeProfileId)}>
+            {chromeImportBusy ? copy.chromeImporting : copy.chromeImport}
+          </SecondaryButton>
+          <SecondaryButton disabled={chromeImportBusy} onClick={() => setChromeProfiles([])}>{copy.close}</SecondaryButton>
+        </div>
+      ) : null}
       {selectedManualTab
         && ["awaiting-user", "sent"].includes(selectedManualTab.manualState ?? "") ? (
         <ManualTurnGuide
@@ -1003,17 +1057,23 @@ function BrowserSurface({
               ? copy.noActiveTaskBody
               : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
-              <PrimaryButton disabled={passkeyWaiting} onClick={() => void toggle()}>
+              <PrimaryButton disabled={passkeyWaiting || chromeImportBusy} onClick={() => void toggle()}>
                 {manualInteraction || browser?.authenticated ? copy.openChatgpt : copy.signIn}
               </PrimaryButton>
               {passkeyAvailable ? (
                 <SecondaryButton
-                  disabled={passkeyWaiting && passkeyContinuationRequested}
+                  disabled={chromeImportBusy || (passkeyWaiting && passkeyContinuationRequested)}
                   onClick={passkeyWaiting ? continuePasskeyLogin : openPasskeyLogin}
                 >
                   {passkeyWaiting
                     ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
                     : copy.passkeySignIn}
+                </SecondaryButton>
+              ) : null}
+              {passkeyAvailable ? (
+                <SecondaryButton disabled={chromeImportBusy || operation?.status === "running" || navigationLocked}
+                  onClick={() => void openChromeImport()}>
+                  {chromeImportBusy ? copy.chromeImporting : copy.chromeImport}
                 </SecondaryButton>
               ) : null}
             </div>

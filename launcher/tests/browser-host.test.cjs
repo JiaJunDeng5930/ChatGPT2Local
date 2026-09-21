@@ -1003,7 +1003,7 @@ test("passkey login imports only validated state and re-proves the Launcher sess
     snapshot: () => ({ ...fixture.state }),
   });
   let cleaned = false;
-  const result = await BrowserHost.prototype.installPasskeyLogin.call(fixture, {
+  const result = await BrowserHost.prototype.installSessionLogin.call(fixture, {
     storageState: {
       cookies: [{
         name: "session",
@@ -1042,7 +1042,7 @@ test("invalid passkey transfer is removed without mutating the embedded session"
     } },
   });
   await assert.rejects(
-    BrowserHost.prototype.installPasskeyLogin.call(fixture, {
+    BrowserHost.prototype.installSessionLogin.call(fixture, {
       storageState: {
         cookies: [{
           name: "identity-provider",
@@ -1076,8 +1076,8 @@ test("failed private-transfer cleanup also discards an otherwise imported passke
       isDestroyed: () => false,
       loadURL: async () => {},
     } },
-    clearOwnedSessionForPasskey: async () => {},
-    resetFailedPasskeyLogin: async () => { resets += 1; },
+    clearOwnedSessionForImport: async () => {},
+    resetFailedSessionLogin: async () => { resets += 1; },
     waitForAuthenticated: async () => ({ authenticated: true }),
     runSessionInspection: async () => {},
     activateHomeSurface() {},
@@ -1086,7 +1086,7 @@ test("failed private-transfer cleanup also discards an otherwise imported passke
     snapshot: () => ({ authenticated: true }),
   });
   await assert.rejects(
-    BrowserHost.prototype.installPasskeyLogin.call(fixture, {
+    BrowserHost.prototype.installSessionLogin.call(fixture, {
       storageState: {
         cookies: [{
           name: "session",
@@ -1102,7 +1102,7 @@ test("failed private-transfer cleanup also discards an otherwise imported passke
       },
       cleanup: async () => { throw new Error("synthetic private-file lock"); },
     }),
-    /Removing temporary passkey state failed/,
+    /Removing temporary imported state failed/,
   );
   assert.equal(resets, 1);
 });
