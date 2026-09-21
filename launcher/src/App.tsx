@@ -26,6 +26,7 @@ import type {
 
 const api = window.codexWebLauncher;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
+const BROWSER_TIMEZONES = ["UTC", ...Intl.supportedValuesOf("timeZone")];
 const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
 const MCP_GUIDE_MEDIA = [
   new URL("./assets/mcp-create-tunnel.mp4", import.meta.url).href,
@@ -1594,6 +1595,17 @@ function SettingsSurface({
       setError(messageOf(cause));
     }
   };
+  const setBrowserTimezone = async (timezone: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setBrowserTimezone(timezone));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const runDoctor = async () => {
     setBusy(true);
     try {
@@ -1685,6 +1697,21 @@ function SettingsSurface({
           mode={snapshot.state.browserInteractionMode}
           onChange={(mode) => void setInteractionMode(mode)}
         />
+        <SettingRow body={copy.browserTimezoneBody} label={copy.browserTimezone}>
+          <select
+            aria-label={copy.browserTimezone}
+            className="browser-timezone-select"
+            disabled={busy}
+            onChange={(event) => void setBrowserTimezone(event.target.value)}
+            value={snapshot.state.browserTimezone}
+          >
+            <option value="">{copy.browserTimezoneSystem}</option>
+            {snapshot.state.browserTimezone && !BROWSER_TIMEZONES.includes(snapshot.state.browserTimezone)
+              ? <option value={snapshot.state.browserTimezone}>{snapshot.state.browserTimezone}</option>
+              : null}
+            {BROWSER_TIMEZONES.map((timezone) => <option key={timezone} value={timezone}>{timezone}</option>)}
+          </select>
+        </SettingRow>
         <SettingRow body={devProfile ? copy.devKeepRunningBody : copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
           <Switch
             checked={snapshot.state.keepRunningOnClose}

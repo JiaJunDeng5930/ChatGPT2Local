@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
     browserInteractionMode,
   ),
   openExternal: (url) => ipcRenderer.invoke("launcher:open-external", url),
+  setBrowserTimezone: (timezone) => ipcRenderer.invoke("launcher:browser-timezone", timezone),
   setBrowserBounds: (bounds) => ipcRenderer.invoke("launcher:browser-bounds", bounds),
   setBrowserSurfaceActive: (active) => ipcRenderer.invoke("launcher:browser-surface-active", active),
   showBrowser: () => ipcRenderer.invoke("launcher:browser-show"),

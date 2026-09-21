@@ -1,3 +1,4 @@
+const { validateBrowserTimezone } = require("./browser-timezone.cjs");
 const languages = require("./languages.json");
 const fs = require("node:fs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
@@ -15,6 +16,7 @@ const DEFAULT_STATE = Object.freeze({
   keepRunningOnClose: true,
   showBrowserDuringTurns: true,
   browserInteractionMode: "automatic",
+  browserTimezone: "",
   experimentalBiggerContext: false,
   experimentalSkillAttachments: false,
   zeroRiskProEnabled: false,
@@ -55,6 +57,8 @@ function readState(filePath) {
     ]) {
       if (typeof state[key] !== "boolean") state[key] = DEFAULT_STATE[key];
     }
+    try { state.browserTimezone = validateBrowserTimezone(state.browserTimezone); }
+    catch { state.browserTimezone = DEFAULT_STATE.browserTimezone; }
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
       state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
     }

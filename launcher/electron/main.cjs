@@ -902,6 +902,19 @@ function registerIpc({ logger, stateStore }) {
     if (!IS_DEV_PROFILE && result.configured) startCatalogVerificationMonitor({ logger, stateStore });
     return { state, credentialsRequired: false, targetMode: mode };
   });
+  handle("launcher:browser-timezone", async (_event, timezone) => {
+    const previous = stateStore.read().browserTimezone;
+    const browserTimezone = await browserHost.browserTimezone.set(timezone);
+    try {
+      const state = stateStore.update({ browserTimezone });
+      send("launcher:state-changed", state);
+      return state;
+    } catch (error) {
+      await browserHost.browserTimezone.set(previous);
+      throw error;
+    }
+  });
+
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns";
     if (!ordinary) throw new Error("Unknown preference");
@@ -1100,6 +1113,7 @@ async function start() {
     loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),
     partition: LAUNCHER_PROFILE.browserPartition,
     profile: LAUNCHER_PROFILE.kind,
+    browserTimezone: stateStore.read().browserTimezone,
     publishState: (state) => send("launcher:browser-state", state),
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,

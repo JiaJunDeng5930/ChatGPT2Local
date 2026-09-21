@@ -15,6 +15,7 @@ export interface LauncherState {
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
   browserInteractionMode: BrowserInteractionMode;
+  browserTimezone: string;
   experimentalBiggerContext: boolean;
   experimentalSkillAttachments: boolean;
   zeroRiskProEnabled: boolean;
@@ -160,6 +161,7 @@ export interface LauncherApi {
   setBiggerContext(enabled: boolean): Promise<LauncherState>;
   setSkillAttachments(enabled: boolean): Promise<LauncherState>;
   setZeroRiskPro(enabled: boolean): Promise<LauncherState>;
+  setBrowserTimezone(timezone: string): Promise<LauncherState>;
   setBrowserInteractionMode(mode: BrowserInteractionMode): Promise<{
     state: LauncherState;
     credentialsRequired: boolean;

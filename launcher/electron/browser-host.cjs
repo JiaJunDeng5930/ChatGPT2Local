@@ -1,3 +1,4 @@
+const { BrowserTimezone } = require("./browser-timezone.cjs");
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
@@ -317,6 +318,7 @@ class BrowserHost {
     showWindow = () => {},
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
+    browserTimezone = "",
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -346,6 +348,7 @@ class BrowserHost {
     this.showWindow = showWindow;
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
+    this.browserTimezone = new BrowserTimezone(browserTimezone, logger);
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -432,6 +435,7 @@ class BrowserHost {
     this.view.setBounds(this.hiddenTurnBounds());
     this.view.setVisible(true);
     try {
+      await this.browserTimezone.attach(this.view.webContents);
       await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL);
       if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
     } finally {
@@ -582,6 +586,7 @@ class BrowserHost {
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
     try {
+      await this.browserTimezone.attach(view.webContents);
       await loadCommittedBrowserSurface(view.webContents, IDLE_BROWSER_URL);
       await this.markTurnTabSurface(tab);
       tab.initializingSurface = false;
@@ -664,6 +669,7 @@ class BrowserHost {
   async initializeManualTurnTab(tab) {
     const contents = tab.view.webContents;
     try {
+      await this.browserTimezone.attach(contents);
       await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL);
     } catch (error) {
       if (this.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
@@ -1637,6 +1643,11 @@ class BrowserHost {
     this.closeAuthView(this.authView, true);
     const authView = new WebContentsView({ webContents: options.webContents });
     this.authView = authView;
+    void this.browserTimezone.attach(authView.webContents).catch(error => {
+      this.logger.error("browser.timezone_override_failed", { message: error.message });
+      this.closeAuthView(authView, true, false);
+      this.setState({ status: "error", message: error.message });
+    });
     this.authNavigationError = null;
     this.window.contentView.addChildView(authView);
     authView.setBounds(this.bounds);
