@@ -435,8 +435,9 @@ class BrowserHost {
     this.view.setBounds(this.hiddenTurnBounds());
     this.view.setVisible(true);
     try {
-      await this.browserTimezone.attach(this.view.webContents);
       await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL);
+      // CDP emulation needs a live renderer; initialize the owned blank page first.
+      await this.browserTimezone.attach(this.view.webContents);
       if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
     } finally {
       this.syncViewVisibility();
@@ -586,8 +587,8 @@ class BrowserHost {
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
     try {
-      await this.browserTimezone.attach(view.webContents);
       await loadCommittedBrowserSurface(view.webContents, IDLE_BROWSER_URL);
+      await this.browserTimezone.attach(view.webContents);
       await this.markTurnTabSurface(tab);
       tab.initializingSurface = false;
     } catch (error) {
@@ -669,8 +670,8 @@ class BrowserHost {
   async initializeManualTurnTab(tab) {
     const contents = tab.view.webContents;
     try {
-      await this.browserTimezone.attach(contents);
       await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL);
+      await this.browserTimezone.attach(contents);
     } catch (error) {
       if (this.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
       this.logger.error("browser.manual_tab_initialization_failed", {
