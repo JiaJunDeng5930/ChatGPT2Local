@@ -11,6 +11,17 @@ checkout with a Jev provider key:
 ASTRA_JEV_JEV_API_KEY=jev-provider-key bun run astra-jev
 ```
 
+Packaged applications also include a standalone `bin/astra-jev` launcher
+(`astra-jev.cmd` on Windows) and the bundled Bun runtime. On macOS:
+
+```sh
+ASTRA_JEV_JEV_API_KEY=jev-provider-key \
+  "/Applications/Codex Web GPT.app/Contents/Resources/runtime/bin/astra-jev"
+```
+
+Opening the main application does not start this proxy. Its configuration,
+history directory, and lifecycle remain independent.
+
 The key is used only for the Jev decision request. The default Vercel provider
 uses `AI_GATEWAY_API_KEY`; Typesafe and OpenRouter can use
 `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` respectively. The explicit

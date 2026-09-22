@@ -80,6 +80,13 @@ if (!browserHelperBuild.success) {
   throw new Error(`Browser helper bundle failed: ${browserHelperBuild.logs.map(log => log.message).join("; ")}`);
 }
 
+// Keep the proxy self-contained; the bundled Bun can run its TypeScript directly.
+const astraJevDir = join(output, "astra-jev");
+mkdirSync(astraJevDir, { recursive: true });
+for (const entry of ["src", "ui", "package.json", "README.md"]) {
+  cpSync(join(root, "astra-jev", entry), join(astraJevDir, entry), { recursive: true });
+}
+
 copyFileSync(join(root, "package.json"), join(appDir, "package.json"));
 copyFileSync(join(root, "bun.lock"), join(appDir, "bun.lock"));
 const install = Bun.spawnSync([process.execPath, "install", "--production", "--frozen-lockfile", "--ignore-scripts"], {
@@ -94,13 +101,12 @@ const bunName = process.platform === "win32" ? "bun.exe" : "bun";
 cpSync(embeddedBunExecutable(), join(runtimeDir, bunName));
 if (process.platform !== "win32") chmodSync(join(runtimeDir, bunName), 0o755);
 
-const launcherName = process.platform === "win32" ? "codex-chatgpt-web.cmd" : "codex-chatgpt-web";
-const launcher = process.platform === "win32" ? `@echo off
+function runtimeLauncher(entrypoint: string, launcherEnvironment?: string): string {
+  return process.platform === "win32" ? `@echo off
 setlocal
 chcp 65001 >nul
 set "ROOT=%~dp0.."
-set "CODEX_CHATGPT_WEB_LAUNCHER=%~f0"
-"%ROOT%\\runtime\\bun.exe" "%ROOT%\\app\\cli.js" %*
+${launcherEnvironment ? `set "${launcherEnvironment}=%~f0"\n` : ""}"%ROOT%\\runtime\\bun.exe" "%ROOT%\\${entrypoint.replaceAll("/", "\\")}" %*
 ` : `#!/bin/sh
 set -eu
 invoked="$0"
@@ -118,11 +124,19 @@ while [ -L "$script" ]; do
 done
 bin_dir="$(CDPATH= cd -- "$(dirname "$script")" && pwd -P)"
 root="$(CDPATH= cd -- "$bin_dir/.." && pwd -P)"
-export CODEX_CHATGPT_WEB_LAUNCHER="$invoked"
-exec "$root/runtime/bun" "$root/app/cli.js" "$@"
+${launcherEnvironment ? `export ${launcherEnvironment}="$invoked"\n` : ""}exec "$root/runtime/bun" "$root/${entrypoint}" "$@"
 `;
-writeFileSync(join(binDir, launcherName), launcher, process.platform === "win32" ? undefined : { mode: 0o755 });
-if (process.platform !== "win32") chmodSync(join(binDir, launcherName), 0o755);
+}
+
+const launcherName = process.platform === "win32" ? "codex-chatgpt-web.cmd" : "codex-chatgpt-web";
+const astraJevLauncherName = process.platform === "win32" ? "astra-jev.cmd" : "astra-jev";
+for (const [name, contents] of [
+  [launcherName, runtimeLauncher("app/cli.js", "CODEX_CHATGPT_WEB_LAUNCHER")],
+  [astraJevLauncherName, runtimeLauncher("astra-jev/src/main.ts")],
+]) {
+  writeFileSync(join(binDir, name), contents, process.platform === "win32" ? undefined : { mode: 0o755 });
+  if (process.platform !== "win32") chmodSync(join(binDir, name), 0o755);
+}
 
 const notices = Bun.spawnSync([
   process.execPath,
