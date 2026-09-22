@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Astra Jev Proxy · History</title>
+    <link rel="stylesheet" href="/assets/style.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">ASTRA JEV PROXY</p>
+          <h1>History 查看</h1>
+          <p class="lede">只读查看代理仍保留的请求 history、最近消息和配置更新。</p>
+        </div>
+        <div class="toolbar">
+          <span id="serviceState" class="status-pill" data-state="loading">连接中</span>
+          <button id="refreshButton" class="button button-primary" type="button">刷新</button>
+        </div>
+      </header>
+
+      <div id="errorNotice" class="notice notice-error" role="alert" hidden></div>
+
+      <section class="overview" aria-label="代理状态">
+        <div class="overview-card">
+          <span class="card-label">代理名称</span>
+          <strong id="proxyName">等待连接</strong>
+        </div>
+        <div class="overview-card">
+          <span class="card-label">上游地址</span>
+          <strong id="upstreamBaseUrl">—</strong>
+        </div>
+        <div class="overview-card">
+          <span class="card-label">保留策略</span>
+          <strong id="retentionSummary">—</strong>
+        </div>
+        <div class="overview-card">
+          <span class="card-label">服务启动</span>
+          <strong id="startedAt">—</strong>
+        </div>
+      </section>
+
+      <section class="history-section" aria-labelledby="historiesHeading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">保留记录</p>
+            <h2 id="historiesHeading">保留的 History</h2>
+          </div>
+          <div class="section-aside">
+            <span id="pollHint">每 5 秒自动刷新</span>
+            <span id="lastRefreshed">尚未刷新</span>
+          </div>
+        </div>
+        <div id="historyTabs" class="history-tabs" role="tablist" aria-label="保留的 history" tabindex="0"></div>
+      </section>
+
+      <main id="mainContent">
+        <section id="emptyState" class="empty-state" aria-live="polite">
+          <div class="empty-mark" aria-hidden="true">∅</div>
+          <h2 id="emptyTitle">正在读取 history</h2>
+          <p id="emptyDescription">从代理读取仍在保留的记录。</p>
+        </section>
+
+        <section id="historyView" class="history-view" hidden>
+          <header class="history-header panel">
+            <div>
+              <p class="eyebrow">当前 History</p>
+              <h2 id="historyTitle">—</h2>
+              <p id="historyId" class="history-id">—</p>
+            </div>
+            <div class="history-metadata" aria-label="History 元数据">
+              <div class="metadata-item">
+                <span>最后活动</span>
+                <strong id="historyLastActiveAt">—</strong>
+              </div>
+              <div class="metadata-item">
+                <span>到期时间</span>
+                <strong id="historyExpiresAt">—</strong>
+              </div>
+              <div class="metadata-item">
+                <span>活动请求</span>
+                <strong id="historyActiveRequests">—</strong>
+              </div>
+              <div class="metadata-item">
+                <span>模型 / Effort</span>
+                <strong id="historyModelEffort">—</strong>
+              </div>
+            </div>
+          </header>
+
+          <div id="detailLoading" class="detail-loading" role="status" hidden>正在刷新当前 history…</div>
+
+          <div class="content-grid">
+            <section class="panel content-panel" aria-labelledby="messagesHeading">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">最近消息</p>
+                  <h2 id="messagesHeading">最近消息</h2>
+                </div>
+                <span id="messageCount" class="count-label">—</span>
+              </div>
+              <div id="messagesList" class="message-list"></div>
+            </section>
+
+            <section class="panel content-panel" aria-labelledby="updatesHeading">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">代理事件</p>
+                  <h2 id="updatesHeading">配置更新</h2>
+                </div>
+                <span id="updateCount" class="count-label">—</span>
+              </div>
+              <div id="updatesList" class="update-list"></div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
