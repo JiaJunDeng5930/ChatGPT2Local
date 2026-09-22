@@ -26,7 +26,7 @@ export const ALL_REASONING_EFFORTS: readonly ReasoningEffort[] = [
   "ultra",
 ];
 
-export const DEFAULT_SUPPORTED_EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high"];
+export const DEFAULT_SUPPORTED_EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
 
 export const JEV_PROVIDERS: readonly JevClientOptions["provider"][] = [
   "vercel",
