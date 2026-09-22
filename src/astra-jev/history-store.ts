@@ -22,10 +22,11 @@ import {
   type ReasoningEffort,
   type RecentMessage,
 } from "./types";
+import { DEFAULT_LATEST_MESSAGE_LIMIT, DEFAULT_RETENTION_HOURS } from "./config";
 
 const STATE_VERSION = 1;
-const HISTORY_RETENTION_MS = 24 * 60 * 60 * 1_000;
-const RECENT_MESSAGE_LIMIT = 8;
+const HISTORY_RETENTION_MS = DEFAULT_RETENTION_HOURS * 60 * 60 * 1_000;
+const RECENT_MESSAGE_LIMIT = DEFAULT_LATEST_MESSAGE_LIMIT;
 const RECENT_MESSAGE_TEXT_LIMIT = 4_000;
 const ABORT_STATUS = 499;
 const REASONING_EFFORT_VALUES: readonly ReasoningEffort[] = [

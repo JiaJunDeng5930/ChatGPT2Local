@@ -1,8 +1,0 @@
-{
-  "name": "astra-jev",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "start": "bun run src/main.ts"
-  }
-}

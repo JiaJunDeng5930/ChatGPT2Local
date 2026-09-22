@@ -1435,9 +1435,10 @@ class RuntimeSupervisor {
   async control(config, action, options = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 5_000);
+    const method = options.method ?? "POST";
     try {
       const response = await fetch(`http://${config.host}:${config.port}/admin/${action}`, {
-        method: "POST",
+        method,
         headers: {
           authorization: `Bearer ${config.controlToken}`,
           ...(options.body === undefined ? {} : { "content-type": "application/json" }),
@@ -1445,7 +1446,22 @@ class RuntimeSupervisor {
         ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
         signal: controller.signal,
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        let payload;
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+        const detail = payload?.error;
+        if (detail && typeof detail.message === "string" && detail.message.trim()) {
+          const error = new Error(detail.message);
+          if (typeof detail.code === "string" && detail.code.trim()) error.code = detail.code;
+          error.status = response.status;
+          throw error;
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
       return await response.json();
     } finally {
       clearTimeout(timeout);

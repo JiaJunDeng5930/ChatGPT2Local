@@ -80,13 +80,6 @@ if (!browserHelperBuild.success) {
   throw new Error(`Browser helper bundle failed: ${browserHelperBuild.logs.map(log => log.message).join("; ")}`);
 }
 
-// Keep the proxy self-contained; the bundled Bun can run its TypeScript directly.
-const astraJevDir = join(output, "astra-jev");
-mkdirSync(astraJevDir, { recursive: true });
-for (const entry of ["src", "ui", "package.json", "README.md"]) {
-  cpSync(join(root, "astra-jev", entry), join(astraJevDir, entry), { recursive: true });
-}
-
 copyFileSync(join(root, "package.json"), join(appDir, "package.json"));
 copyFileSync(join(root, "bun.lock"), join(appDir, "bun.lock"));
 const install = Bun.spawnSync([process.execPath, "install", "--production", "--frozen-lockfile", "--ignore-scripts"], {
@@ -129,10 +122,8 @@ ${launcherEnvironment ? `export ${launcherEnvironment}="$invoked"\n` : ""}exec "
 }
 
 const launcherName = process.platform === "win32" ? "codex-chatgpt-web.cmd" : "codex-chatgpt-web";
-const astraJevLauncherName = process.platform === "win32" ? "astra-jev.cmd" : "astra-jev";
 for (const [name, contents] of [
   [launcherName, runtimeLauncher("app/cli.js", "CODEX_CHATGPT_WEB_LAUNCHER")],
-  [astraJevLauncherName, runtimeLauncher("astra-jev/src/main.ts")],
 ]) {
   writeFileSync(join(binDir, name), contents, process.platform === "win32" ? undefined : { mode: 0o755 });
   if (process.platform !== "win32") chmodSync(join(binDir, name), 0o755);

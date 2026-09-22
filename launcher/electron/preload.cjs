@@ -8,6 +8,9 @@ function subscription(channel, listener) {
 
 contextBridge.exposeInMainWorld("codexWebLauncher", {
   snapshot: () => ipcRenderer.invoke("launcher:snapshot"),
+  getAstraJevState: () => ipcRenderer.invoke("launcher:astra-jev-state"),
+  saveAstraJevSettings: (input) => ipcRenderer.invoke("launcher:astra-jev-settings", input),
+  getAstraJevHistory: (id) => ipcRenderer.invoke("launcher:astra-jev-history", id),
   setLanguage: (language) => ipcRenderer.invoke("launcher:set-language", language),
   openSocial: (target) => ipcRenderer.invoke("launcher:open-social", target),
   completeOnboarding: (language, browserInteractionMode) => ipcRenderer.invoke(

@@ -519,6 +519,10 @@ function registerIpc({ logger, stateStore }) {
     update: updateController?.getState() ?? { status: "disabled" },
   }));
 
+  handle("launcher:astra-jev-state", () => runtimeHost.getAstraJevState());
+  handle("launcher:astra-jev-settings", (_event, input) => runtimeHost.saveAstraJevSettings(input));
+  handle("launcher:astra-jev-history", (_event, id) => runtimeHost.getAstraJevHistory(id));
+
   handle("launcher:set-language", (_event, language) => {
     const state = stateStore.update({ language: validateLanguage(language) });
     updateTrayMenu(state.language);

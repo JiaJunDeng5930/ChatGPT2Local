@@ -2733,3 +2733,508 @@ code {
   border: 1px solid var(--color-border);
   border-radius: 6px;
 }
+
+/* Astra Jev */
+
+.astra-jev-scroll {
+  width: min(1060px, calc(100% - 64px));
+}
+
+.astra-jev-header {
+  margin-bottom: 14px;
+}
+
+.astra-jev-title-row,
+.astra-jev-panel-heading,
+.astra-jev-section-heading,
+.astra-jev-settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.astra-jev-title-row {
+  align-items: flex-end;
+}
+
+.astra-jev-refresh {
+  flex: none;
+}
+
+.astra-jev-notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.astra-jev-notice.is-error {
+  border-color: rgb(250 66 62 / 32%);
+  background: var(--color-background-status-error);
+  color: var(--color-text-error);
+}
+
+.astra-jev-notice.is-success {
+  border-color: rgb(64 201 119 / 32%);
+  background: var(--color-background-status-success);
+  color: var(--color-text-success);
+}
+
+.astra-jev-surface .panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-background-control);
+}
+
+.astra-jev-settings {
+  padding: 16px;
+}
+
+.astra-jev-panel-heading h2,
+.astra-jev-section-heading h2,
+.astra-jev-detail-header h2,
+.astra-jev-content-panel h3 {
+  margin: 3px 0 0;
+  color: var(--color-text-primary);
+  font-size: var(--text-lg);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.astra-jev-eyebrow {
+  display: block;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+
+.astra-jev-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: var(--radius-round);
+  background: var(--color-background-status-warning);
+  color: var(--color-text-warning);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.astra-jev-status.is-configured {
+  background: var(--color-background-status-success);
+  color: var(--color-text-success);
+}
+
+.astra-jev-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.astra-jev-form-grid {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.6fr) minmax(280px, 1.4fr);
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.astra-jev-field {
+  display: grid;
+  gap: 7px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.astra-jev-field input,
+.astra-jev-field select {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border-heavy);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+}
+
+.astra-jev-field input {
+  font-family: var(--font-mono);
+}
+
+.astra-jev-field input::placeholder {
+  color: var(--color-text-disabled);
+}
+
+.astra-jev-settings-footer {
+  align-items: flex-end;
+  margin-top: 16px;
+  padding-top: 13px;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.astra-jev-clear-key {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.astra-jev-clear-key input {
+  margin: 2px 0 0;
+  accent-color: var(--blue-300);
+}
+
+.astra-jev-clear-key span {
+  display: grid;
+  gap: 3px;
+}
+
+.astra-jev-clear-key strong {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.astra-jev-clear-key small {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.astra-jev-runtime {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(110px, 1fr));
+  gap: 0;
+  margin-top: 12px;
+  overflow: hidden;
+}
+
+.astra-jev-runtime-item {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 12px;
+  border-right: 1px solid var(--color-border-light);
+}
+
+.astra-jev-runtime-item:last-child {
+  border-right: 0;
+}
+
+.astra-jev-runtime-item span,
+.astra-jev-runtime-item strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.astra-jev-runtime-item span {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.astra-jev-runtime-item strong,
+.astra-jev-runtime-item code {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.astra-jev-runtime-item code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.astra-jev-history-section {
+  margin-top: 28px;
+}
+
+.astra-jev-refresh-hint {
+  color: var(--color-text-disabled);
+  font-size: var(--text-xs);
+}
+
+.astra-jev-history-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.astra-jev-history-tab {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 11px 12px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: var(--color-text-tertiary);
+  text-align: left;
+}
+
+.astra-jev-history-tab:hover,
+.astra-jev-history-tab.is-selected {
+  border-color: var(--color-border-heavy);
+  background: var(--color-background-control-hover);
+  color: var(--color-text-secondary);
+}
+
+.astra-jev-history-tab.is-selected {
+  box-shadow: inset 2px 0 var(--blue-300);
+}
+
+.astra-jev-history-tab strong {
+  overflow: hidden;
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.astra-jev-history-tab span {
+  overflow: hidden;
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.astra-jev-history-tab em {
+  position: absolute;
+  display: none;
+}
+
+.astra-jev-empty {
+  display: flex;
+  min-height: 160px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 20px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.astra-jev-empty svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
+.astra-jev-empty strong {
+  display: block;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.astra-jev-empty p {
+  max-width: 560px;
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
+
+.astra-jev-detail {
+  margin-top: 20px;
+}
+
+.astra-jev-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px;
+}
+
+.astra-jev-detail-header code {
+  display: block;
+  max-width: 420px;
+  margin-top: 7px;
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.astra-jev-metadata {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 12px 18px;
+  min-width: 330px;
+  margin: 0;
+}
+
+.astra-jev-metadata div {
+  display: grid;
+  gap: 3px;
+}
+
+.astra-jev-metadata dt {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.astra-jev-metadata dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.astra-jev-detail-loading {
+  margin-top: 8px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.astra-jev-content-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.astra-jev-content-panel {
+  min-width: 0;
+  padding: 16px;
+}
+
+.astra-jev-count {
+  display: inline-flex;
+  min-width: 24px;
+  min-height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 7px;
+  border-radius: var(--radius-round);
+  background: var(--color-background-control-hover);
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.astra-jev-message-list,
+.astra-jev-update-list {
+  margin-top: 14px;
+}
+
+.astra-jev-message,
+.astra-jev-update {
+  padding: 11px 0;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.astra-jev-item-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.astra-jev-item-heading small {
+  flex: none;
+  color: var(--color-text-disabled);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.astra-jev-message p,
+.astra-jev-update-reason {
+  margin: 7px 0 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.astra-jev-item-note,
+.astra-jev-update-reason {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.astra-jev-update pre {
+  max-height: 260px;
+  margin: 9px 0 9px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-surface-under);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.astra-jev-copy {
+  min-height: 26px;
+  padding: 0 9px;
+}
+
+.astra-jev-panel-empty {
+  margin: 24px 0 8px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+@media (max-width: 880px) {
+  .astra-jev-form-grid,
+  .astra-jev-runtime,
+  .astra-jev-content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .astra-jev-runtime-item {
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border-light);
+  }
+
+  .astra-jev-runtime-item:last-child {
+    border-bottom: 0;
+  }
+
+  .astra-jev-detail-header {
+    display: grid;
+  }
+
+  .astra-jev-metadata {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .astra-jev-scroll {
+    width: calc(100% - 36px);
+  }
+
+  .astra-jev-title-row,
+  .astra-jev-settings-footer,
+  .astra-jev-section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .astra-jev-refresh {
+    align-self: flex-start;
+  }
+
+  .astra-jev-metadata {
+    grid-template-columns: 1fr;
+  }
+}

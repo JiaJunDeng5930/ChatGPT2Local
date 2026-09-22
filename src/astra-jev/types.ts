@@ -9,6 +9,26 @@ export type ReasoningEffort =
   | "max"
   | "ultra";
 
+export type JevProvider = "vercel" | "typesafe" | "openrouter";
+
+export interface AstraJevState {
+  modelId: "astra-jev";
+  endpoint: string;
+  provider: JevProvider;
+  configured: boolean;
+  supportedEfforts: string[];
+  timeoutMs: number;
+  retentionHours: 24;
+  latestMessageLimit: 8;
+  histories: HistorySummary[];
+}
+
+export interface AstraJevSettingsInput {
+  provider: JevProvider;
+  apiKey?: string;
+  clearApiKey?: boolean;
+}
+
 export type JevLeaseSteps = 1 | 2 | 5 | 10;
 
 export interface JevDecision {

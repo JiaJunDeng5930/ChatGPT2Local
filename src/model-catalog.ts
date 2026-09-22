@@ -1,4 +1,5 @@
 import type { AppConfig } from "./config";
+import { ASTRA_JEV_MODEL_ID, ASTRA_JEV_UPSTREAM_MODEL, DEFAULT_SUPPORTED_EFFORTS } from "./astra-jev/config";
 import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
@@ -150,6 +151,60 @@ export function buildChatGptWebModel(
   return model;
 }
 
+function nativeAstraTemplate(models: unknown[]): JsonObject | undefined {
+  const candidate = models.find(value => {
+    const modelSlug = slug(value);
+    return modelSlug === ASTRA_JEV_UPSTREAM_MODEL || modelSlug === ASTRA_JEV_MODEL_ID;
+  });
+  return candidate && typeof candidate === "object" && !Array.isArray(candidate)
+    ? candidate as JsonObject
+    : undefined;
+}
+
+function buildAstraJevModel(models: unknown[]): JsonObject {
+  const source = nativeAstraTemplate(models);
+  const model = source
+    ? structuredClone(source)
+    : {
+      slug: ASTRA_JEV_MODEL_ID,
+      input_modalities: ["text"],
+      supported_reasoning_levels: [],
+      visibility: "list",
+      supported_in_api: true,
+    } as JsonObject;
+  const sourceLevels = Array.isArray(model.supported_reasoning_levels)
+    ? model.supported_reasoning_levels.filter(level => level && typeof level === "object" && !Array.isArray(level)) as JsonObject[]
+    : [];
+  const levelFor = (effort: string): JsonObject => {
+    const sourceLevel = sourceLevels.find(level => level.effort === effort);
+    return {
+      ...(sourceLevel ? structuredClone(sourceLevel) : {}),
+      effort,
+      description: "Astra Jev uses medium as the baseline and adaptively selects the next reasoning effort from retained task state.",
+    };
+  };
+  model.slug = ASTRA_JEV_MODEL_ID;
+  model.display_name = "Astra Jev";
+  model.description = "Astra Jev uses medium as the baseline and adaptively selects reasoning effort from retained task state.";
+  model.visibility = "list";
+  model.supported_in_api = true;
+  model.default_reasoning_level = "medium";
+  model.supported_reasoning_levels = DEFAULT_SUPPORTED_EFFORTS.map(levelFor);
+  model.tool_mode = null;
+  model.upgrade = null;
+  delete model.comp_hash;
+  delete model.availability_nux;
+  if (!source) {
+    // The upstream catalog did not describe Astra; leaving context fields absent avoids inventing a
+    // window that could cause the native client to truncate or compact at the wrong boundary.
+    delete model.context_window;
+    delete model.max_context_window;
+    delete model.effective_context_window_percent;
+    delete model.auto_compact_token_limit;
+  }
+  return model;
+}
+
 export function augmentNativeModelCatalog(
   value: unknown,
   config: AppConfig,
@@ -160,7 +215,10 @@ export function augmentNativeModelCatalog(
     throw new Error("Native Codex models response is missing a models array");
   }
   const nativeModels = structuredClone(
-    catalog.models.filter(model => !slug(model)?.startsWith(CHATGPT_WEB_MODEL_PREFIX)),
+    catalog.models.filter(model => {
+      const modelSlug = slug(model);
+      return !modelSlug?.startsWith(CHATGPT_WEB_MODEL_PREFIX) && modelSlug !== ASTRA_JEV_MODEL_ID;
+    }),
   );
   if (config.subagentProtocol === "compatibility-v1") {
     for (const candidate of nativeModels) {
@@ -190,8 +248,9 @@ export function augmentNativeModelCatalog(
   }
   const webModels = availableChatGptWebModelRoutes(config)
     .map(route => buildChatGptWebModel(template, route, config));
+  const astraJevModel = buildAstraJevModel(nativeModels);
   return {
     ...structuredClone(catalog),
-    models: [...nativeModels, ...webModels],
+    models: [...nativeModels, ...webModels, astraJevModel],
   };
 }

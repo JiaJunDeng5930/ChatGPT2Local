@@ -1,6 +1,9 @@
 # Run Astra Jev as an independent local Responses proxy
 
-Status: Accepted
+Status: Superseded
+
+Superseded by [ADR 0004](0004-astra-jev-internal-module.md). The independent listener, package,
+CLI, and `~/.astra-jev` storage described below are no longer part of the architecture.
 
 `gpt-6-astra` management needs a request path that can retain complete caller
 history, ask Jev for an effort and lease decision, and still preserve the

@@ -49,6 +49,15 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
+import {
+  ASTRA_JEV_MODEL_ID,
+  ASTRA_JEV_UPSTREAM_MODEL,
+  astraJevErrorResponse,
+  createAstraJevService,
+  formatAstraJevError,
+  type AstraJevService,
+} from "./astra-jev/proxy";
+import type { AstraJevSettingsInput } from "./astra-jev/types";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
 
@@ -360,6 +369,10 @@ export interface ResponseRequestOptions {
   onAdapterEvent?: (event: AdapterEvent) => void;
   /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
+  /** Internal Astra Jev control and settings handle owned by the main daemon. */
+  astraJev?: AstraJevService;
+  /** Test and composition-root override for the existing native upstream transport. */
+  fetchUpstream?: NativeFetch;
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -491,6 +504,25 @@ export async function responseRequest(
     }
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
+  if (requestedModel === ASTRA_JEV_MODEL_ID) {
+    if (!options.astraJev) {
+      return formatErrorResponse(503, "server_error", "Astra Jev is unavailable in this daemon composition");
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return formatErrorResponse(400, "invalid_request_error", "Request body must be a JSON object");
+    }
+    return options.astraJev.handleResponse(
+      nativeRequest,
+      raw as Record<string, unknown>,
+      (request, body) => forwardNativeCodexRequest(
+        request,
+        "responses",
+        options.fetchUpstream ?? fetchNativeCodex,
+        body,
+        { forceDecodedBody: true, scrubBridgeArtifacts: false },
+      ),
+    );
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {
@@ -675,7 +707,7 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
-  options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "fetchUpstream"> = {},
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
@@ -716,6 +748,19 @@ export async function compactRequest(
   }
   if (typeof raw.model !== "string" || !raw.model) {
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
+  }
+  if (raw.model === ASTRA_JEV_MODEL_ID) {
+    try {
+      return await forwardNativeCodexRequest(
+        nativeRequest,
+        "responses/compact",
+        options.fetchUpstream ?? fetchNativeCodex,
+        { ...raw, model: ASTRA_JEV_UPSTREAM_MODEL },
+        { forceDecodedBody: true },
+      );
+    } catch (error) {
+      return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+    }
   }
   if (!isChatGptWebModelSlug(raw.model)) {
     try {
@@ -790,12 +835,17 @@ export async function compactRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
+  dependencies: {
+    fetchUpstream?: NativeFetch;
+    adapterFactory?: ChatGptWebAdapterFactory;
+    astraJev?: AstraJevService;
+  } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
   const startedAt = Date.now();
+  const astraJev = dependencies.astraJev ?? createAstraJevService();
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {
@@ -845,6 +895,40 @@ export function startServer(
           last_model_catalog_result: lastModelCatalogResult,
           ...activity(),
         });
+      }
+      if (url.pathname === "/admin/astra-jev" || url.pathname.startsWith("/admin/astra-jev/histories/")) {
+        if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+        const endpoint = new URL("/v1/responses", req.url).toString();
+        if (url.pathname === "/admin/astra-jev" && req.method === "GET") {
+          return Response.json(astraJev.getState(endpoint), { headers: { "cache-control": "no-store" } });
+        }
+        if (url.pathname === "/admin/astra-jev" && req.method === "POST") {
+          let input: unknown;
+          try {
+            input = await req.json();
+          } catch {
+            return astraJevErrorResponse(400, "invalid_request_error", "Astra Jev settings must be valid JSON");
+          }
+          try {
+            return Response.json(astraJev.saveSettings(input as AstraJevSettingsInput, endpoint), {
+              headers: { "cache-control": "no-store" },
+            });
+          } catch (error) {
+            return formatAstraJevError(error);
+          }
+        }
+        if (url.pathname.startsWith("/admin/astra-jev/histories/") && req.method === "GET") {
+          let id: string;
+          try {
+            id = decodeURIComponent(url.pathname.slice("/admin/astra-jev/histories/".length));
+          } catch {
+            return astraJevErrorResponse(400, "invalid_request_error", "History id is not valid URL encoding");
+          }
+          const detail = astraJev.getHistory(id);
+          if (!detail) return astraJevErrorResponse(404, "history_not_found", "History is missing or expired");
+          return Response.json(detail, { headers: { "cache-control": "no-store" } });
+        }
+        return astraJevErrorResponse(405, "method_not_allowed", "Astra Jev admin route does not accept this method");
       }
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
@@ -1047,7 +1131,11 @@ export function startServer(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            {
+              onTurnIdentity: bindIdentity,
+              astraJev,
+              fetchUpstream: dependencies.fetchUpstream,
+            },
           ),
           req.signal,
           process.platform,
@@ -1061,7 +1149,7 @@ export function startServer(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, fetchUpstream: dependencies.fetchUpstream },
           ),
           req.signal,
           process.platform,
@@ -1112,6 +1200,7 @@ export function startServer(
           console.error(`[codex-chatgpt-web] shutdown cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
         }
       }
+      astraJev.close();
       await server.stop(true);
     })().catch(error => {
       process.exitCode = 1;

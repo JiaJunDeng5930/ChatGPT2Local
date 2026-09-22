@@ -210,6 +210,7 @@ export async function forwardNativeCodexRequest(
   endpoint: NativeCodexEndpoint,
   fetchUpstream: NativeFetch = fetchNativeCodex,
   decodedBody?: unknown,
+  options: { forceDecodedBody?: boolean; scrubBridgeArtifacts?: boolean } = {},
 ): Promise<Response> {
   const authorization = request.headers.get("authorization") ?? "";
   if (!authorization.startsWith("Bearer ") || authorization.length <= "Bearer ".length) {
@@ -242,8 +243,10 @@ export async function forwardNativeCodexRequest(
       const tail = Array.isArray(parsedBody.input) ? parsedBody.input.at(-1) : undefined;
       compactionRequest ||= endpoint === "responses" && isObject(tail) && tail.type === "compaction_trigger";
     }
-    const scrubbed = scrubBridgeArtifactsForNative(parsedBody);
-    if (scrubbed.changed) {
+    const scrubbed = options.scrubBridgeArtifacts === false
+      ? { value: parsedBody, changed: false }
+      : scrubBridgeArtifactsForNative(parsedBody);
+    if (options.forceDecodedBody || scrubbed.changed) {
       headers.delete("content-encoding");
       body = JSON.stringify(scrubbed.value);
     } else {

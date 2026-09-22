@@ -442,6 +442,51 @@ class RuntimeHost {
     };
   }
 
+  async requestAstraJevAdmin(method, action, body) {
+    const config = this.supervisor.readConfig();
+    if (!config) {
+      throw new Error("Local runtime is not configured; complete setup before using Astra Jev");
+    }
+    try {
+      return await this.supervisor.control(config, action, {
+        method,
+        ...(body === undefined ? {} : { body }),
+      });
+    } catch (error) {
+      const secret = typeof body?.apiKey === "string" && body.apiKey ? body.apiKey : null;
+      const originalMessage = error instanceof Error ? error.message : String(error);
+      if (secret && originalMessage.includes(secret)) {
+        const sanitized = new Error(originalMessage.replaceAll(secret, "[redacted]"));
+        if (error && typeof error === "object") {
+          if (typeof error.code === "string") sanitized.code = error.code;
+          if (Number.isInteger(error.status)) sanitized.status = error.status;
+        }
+        error = sanitized;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : "";
+      if (/fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|aborted/i.test(`${message} ${cause}`)) {
+        throw new Error("Local runtime is unavailable; start the configured service before using Astra Jev");
+      }
+      throw error;
+    }
+  }
+
+  getAstraJevState() {
+    return this.requestAstraJevAdmin("GET", "astra-jev");
+  }
+
+  saveAstraJevSettings(input) {
+    return this.requestAstraJevAdmin("POST", "astra-jev", input);
+  }
+
+  getAstraJevHistory(id) {
+    if (typeof id !== "string" || id.length === 0) {
+      throw new Error("Astra Jev history id is required");
+    }
+    return this.requestAstraJevAdmin("GET", `astra-jev/histories/${encodeURIComponent(id)}`);
+  }
+
   mcpCredentialsConfigured(requestedMode) {
     const config = this.runtimeConfigSnapshot().config;
     const interactionMode = requestedMode ?? config?.browserInteractionMode ?? "automatic";

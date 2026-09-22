@@ -1,4 +1,5 @@
 import languages from "../electron/languages.json";
+import { AstraJevSurface } from "./AstraJevSurface";
 import { AnimatePresence, motion } from "motion/react";
 import {
   useCallback,
@@ -583,6 +584,12 @@ function LauncherShell({
                   label={copy.browser}
                   onClick={() => navigateSurface("browser")}
                 />
+                <SidebarItem
+                  active={surface === "astra-jev"}
+                  icon="astraJev"
+                  label="Astra Jev"
+                  onClick={() => navigateSurface("astra-jev")}
+                />
               </SidebarGroup>
               <SidebarGroup label={copy.configuration}>
                 <SidebarItem
@@ -650,6 +657,9 @@ function LauncherShell({
                 platform={snapshot.platform}
                 setError={setError}
               />
+            ) : null}
+            {surface === "astra-jev" ? (
+              <AstraJevSurface language={language} />
             ) : null}
             {surface === "setup" ? (
               <SetupSurface

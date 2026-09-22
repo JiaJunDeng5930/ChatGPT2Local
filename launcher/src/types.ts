@@ -3,7 +3,62 @@ import languages from "../electron/languages.json";
 export type Language = keyof typeof languages;
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "activity" | "settings";
+export type Surface = "browser" | "astra-jev" | "setup" | "mcp" | "activity" | "settings";
+
+export type JevProvider = "vercel" | "typesafe" | "openrouter";
+
+export interface AstraJevState {
+  modelId: "astra-jev";
+  endpoint: string;
+  provider: JevProvider;
+  configured: boolean;
+  supportedEfforts: string[];
+  timeoutMs: number;
+  retentionHours: 24;
+  latestMessageLimit: 8;
+  histories: HistorySummary[];
+}
+
+export interface AstraJevSettingsInput {
+  provider: JevProvider;
+  apiKey?: string;
+  clearApiKey?: boolean;
+}
+
+export interface HistorySummary {
+  id: string;
+  title: string;
+  createdAt: number;
+  lastActiveAt: number;
+  expiresAt: number;
+  activeRequests: number;
+  model: string | null;
+  effort: string | null;
+  updateCount: number;
+}
+
+export interface RecentMessage {
+  id: string;
+  index: number;
+  type: string;
+  role: string | null;
+  text: string;
+  truncated: boolean;
+}
+
+export interface OverlayUpdate {
+  id: string;
+  afterInputIndex: number;
+  createdAt: number;
+  item: Record<string, unknown>;
+  reason?: string;
+}
+
+export interface HistoryDetail {
+  history: HistorySummary;
+  recentMessages: RecentMessage[];
+  updates: OverlayUpdate[];
+}
 
 export interface LauncherState {
   version: 1;
@@ -125,6 +180,9 @@ export interface LauncherSnapshot {
 
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
+  getAstraJevState(): Promise<AstraJevState>;
+  saveAstraJevSettings(input: AstraJevSettingsInput): Promise<AstraJevState>;
+  getAstraJevHistory(id: string): Promise<HistoryDetail>;
   setLanguage(language: Language): Promise<LauncherState>;
   openSocial(target: "github" | "x"): Promise<LauncherState>;
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;

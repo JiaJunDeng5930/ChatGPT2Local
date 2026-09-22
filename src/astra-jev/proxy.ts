@@ -1,11 +1,19 @@
-import { join } from "node:path";
-
-import type { AstraJevConfig } from "./config";
-import { AstraJevError, type HistoryDetail, type HistorySummary } from "./types";
+import {
+  ASTRA_JEV_MODEL_ID,
+  ASTRA_JEV_UPSTREAM_MODEL,
+  AstraJevSettingsStore,
+  defaultAstraJevConfig,
+  type AstraJevConfig,
+} from "./config";
+import {
+  AstraJevError,
+  type AstraJevSettingsInput,
+  type AstraJevState,
+} from "./types";
 import { HistoryStore, type HistorySession } from "./history-store";
 import { JevClient } from "./jev";
 
-export const ASTRA_JEV_MODEL = "gpt-6-astra";
+export { ASTRA_JEV_MODEL_ID, ASTRA_JEV_UPSTREAM_MODEL };
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -34,14 +42,12 @@ const SESSION_HEADERS = [
 ];
 
 type JsonObject = Record<string, unknown>;
-type FetchLike = (input: Request | URL | string, init?: RequestInit) => Promise<Response>;
+export type AstraJevForward = (request: Request, body: JsonObject) => Promise<Response>;
 
-export interface AstraJevProxyOptions {
-  config: AstraJevConfig;
-  historyStore: HistoryStore;
-  jevClient: JevClient;
-  fetchUpstream?: FetchLike;
-  uiDirectory?: string;
+export interface AstraJevServiceOptions {
+  config?: AstraJevConfig;
+  settingsStore?: AstraJevSettingsStore;
+  historyStore?: HistoryStore;
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -52,18 +58,8 @@ function errorResponse(error: unknown): Response {
   const candidate = error instanceof AstraJevError
     ? error
     : new AstraJevError(500, "internal_error", "Astra Jev request failed");
-  const type = candidate.status >= 500
-    ? "server_error"
-    : candidate.status === 401 || candidate.status === 403
-      ? "authentication_error"
-      : candidate.status === 404
-        ? "not_found_error"
-        : candidate.status === 429
-          ? "rate_limit_error"
-          : "invalid_request_error";
   return Response.json({
     error: {
-      type,
       code: candidate.code,
       message: candidate.message,
     },
@@ -78,35 +74,6 @@ function errorResponse(error: unknown): Response {
 
 function reject(status: number, code: string, message: string): never {
   throw new AstraJevError(status, code, message);
-}
-
-async function readJsonBody(request: Request, maxBytes: number): Promise<JsonObject> {
-  const contentLength = request.headers.get("content-length");
-  if (contentLength) {
-    const declared = Number(contentLength);
-    if (Number.isFinite(declared) && declared > maxBytes) {
-      reject(413, "request_too_large", `Request body exceeds the ${maxBytes}-byte limit`);
-    }
-  }
-
-  let bytes: ArrayBuffer;
-  try {
-    bytes = await request.arrayBuffer();
-  } catch {
-    reject(400, "invalid_request_error", "Request body could not be read");
-  }
-  if (bytes.byteLength > maxBytes) {
-    reject(413, "request_too_large", `Request body exceeds the ${maxBytes}-byte limit`);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder().decode(bytes));
-  } catch {
-    reject(400, "invalid_request_error", "Request body must be valid JSON");
-  }
-  if (!isObject(parsed)) reject(400, "invalid_request_error", "Request body must be a JSON object");
-  return parsed;
 }
 
 function parseMetadata(value: unknown): JsonObject | undefined {
@@ -154,7 +121,7 @@ function requestAccountId(request: Request): string {
   return "unknown";
 }
 
-function historyIdentity(body: JsonObject, request: Request, upstreamBaseUrl: string): string {
+function historyIdentity(body: JsonObject, request: Request): string {
   const threadId = requestThreadId(body, request);
   if (!threadId) {
     reject(
@@ -164,7 +131,7 @@ function historyIdentity(body: JsonObject, request: Request, upstreamBaseUrl: st
     );
   }
   const accountId = requestAccountId(request);
-  return ["astra-jev", upstreamBaseUrl, accountId, threadId]
+  return [ASTRA_JEV_MODEL_ID, ASTRA_JEV_UPSTREAM_MODEL, accountId, threadId]
     .map(value => encodeURIComponent(value))
     .join(":");
 }
@@ -180,8 +147,8 @@ function hasDeltaContinuation(body: JsonObject): boolean {
 }
 
 function validateManagedRequest(body: JsonObject, supportedEfforts: readonly string[]): void {
-  if (body.model !== ASTRA_JEV_MODEL) {
-    reject(400, "unsupported_model", `Astra Jev manages model ${ASTRA_JEV_MODEL} only`);
+  if (body.model !== ASTRA_JEV_MODEL_ID) {
+    reject(400, "unsupported_model", `Astra Jev manages model ${ASTRA_JEV_MODEL_ID} only`);
   }
   if (body.previous_response_id !== undefined && body.previous_response_id !== null) {
     reject(400, "previous_response_id_unsupported", "previous_response_id continuations are unsupported; send the full retained input history");
@@ -198,22 +165,6 @@ function validateManagedRequest(body: JsonObject, supportedEfforts: readonly str
   if (supportedEfforts.length === 0) {
     reject(500, "configuration_error", "Astra Jev has no supported reasoning efforts configured");
   }
-}
-
-function forwardedRequestHeaders(request: Request, config: AstraJevConfig): Headers {
-  const headers = new Headers(request.headers);
-  for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
-  headers.delete("content-length");
-  if (config.upstreamApiKey) headers.set("authorization", `Bearer ${config.upstreamApiKey}`);
-  headers.set("content-type", "application/json");
-  return headers;
-}
-
-function upstreamResponsesUrl(request: Request, baseUrl: string): string {
-  const base = `${baseUrl.replace(/\/+$/, "")}/`;
-  const target = new URL("responses", base);
-  target.search = new URL(request.url).search;
-  return target.toString();
 }
 
 function responseHeaders(response: Response): Headers {
@@ -355,130 +306,103 @@ function streamWithSession(
   });
 }
 
-function loopbackHost(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "localhost"
-    || normalized === "127.0.0.1"
-    || normalized === "::1"
-    || normalized === "0.0.0.0"
-    || normalized === "::";
-}
 
-function requestHost(request: Request): string | undefined {
-  const header = request.headers.get("host");
-  if (!header) return undefined;
-  try {
-    return new URL(`http://${header}`).hostname;
-  } catch {
-    return undefined;
-  }
-}
+export class AstraJevService {
+  private readonly config: AstraJevConfig;
+  private readonly settingsStore: AstraJevSettingsStore;
+  private readonly historyStore: HistoryStore;
+  private settings: ReturnType<AstraJevSettingsStore["snapshot"]>;
+  private jevClient: JevClient | undefined;
+  private closed = false;
 
-function localReadAllowed(request: Request, configuredHost: string): boolean {
-  const requestUrl = new URL(request.url);
-  const host = requestHost(request);
-  if (host && !loopbackHost(host) && host !== configuredHost.toLowerCase()) return false;
-  const originHeader = request.headers.get("origin");
-  if (!originHeader) return true;
-  try {
-    const origin = new URL(originHeader);
-    if (origin.protocol !== requestUrl.protocol) return false;
-    const sameHost = origin.hostname === requestUrl.hostname
-      || (loopbackHost(origin.hostname) && loopbackHost(requestUrl.hostname));
-    const originPort = origin.port || (origin.protocol === "https:" ? "443" : "80");
-    const requestPort = requestUrl.port || (requestUrl.protocol === "https:" ? "443" : "80");
-    return sameHost && originPort === requestPort;
-  } catch {
-    return false;
-  }
-}
-
-function contentTypeFor(pathname: string): string {
-  if (pathname.endsWith(".js")) return "text/javascript; charset=utf-8";
-  if (pathname.endsWith(".css")) return "text/css; charset=utf-8";
-  return "text/html; charset=utf-8";
-}
-
-export class AstraJevProxy {
-  private readonly fetchUpstream: FetchLike;
-  private readonly uiDirectory: string;
-
-  constructor(private readonly options: AstraJevProxyOptions) {
-    this.fetchUpstream = options.fetchUpstream || fetch;
-    this.uiDirectory = options.uiDirectory || join(import.meta.dir, "../ui");
+  constructor(options: AstraJevServiceOptions = {}) {
+    this.config = options.config ?? defaultAstraJevConfig();
+    this.settingsStore = options.settingsStore
+      ?? new AstraJevSettingsStore(this.config.storageDirectory);
+    this.historyStore = options.historyStore
+      ?? new HistoryStore({ directory: this.config.storageDirectory });
+    this.settings = this.settingsStore.snapshot(this.config);
+    this.jevClient = this.createClient(this.settings);
   }
 
-  async handle(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname === "/v1/responses" || url.pathname === "/responses") {
-      if (request.method === "GET") return new Response("Astra Jev uses HTTP/SSE; WebSocket transport is unavailable\n", {
-        status: 426,
-        headers: { "content-type": "text/plain; charset=utf-8", upgrade: "websocket" },
-      });
-      if (request.method === "POST") return this.handleResponses(request);
+  getState(endpoint: string): AstraJevState {
+    return {
+      modelId: ASTRA_JEV_MODEL_ID,
+      endpoint,
+      provider: this.settings.provider,
+      configured: this.jevClient !== undefined,
+      supportedEfforts: [...this.settings.supportedEfforts],
+      timeoutMs: this.settings.timeoutMs,
+      retentionHours: this.config.retentionHours,
+      latestMessageLimit: this.config.latestMessageLimit,
+      histories: this.historyStore.list(),
+    };
+  }
+
+  saveSettings(input: AstraJevSettingsInput, endpoint: string): AstraJevState {
+    const next = this.settingsStore.save(input);
+    this.settings = {
+      provider: next.provider,
+      apiKey: next.apiKey,
+      timeoutMs: this.config.timeoutMs,
+      supportedEfforts: [...this.config.supportedEfforts],
+    };
+    this.jevClient = this.createClient(this.settings);
+    return this.getState(endpoint);
+  }
+
+  getHistory(id: string): import("./types").HistoryDetail | undefined {
+    return this.historyStore.get(id);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.historyStore.close();
+  }
+
+  async handleResponse(request: Request, body: JsonObject, forward: AstraJevForward): Promise<Response> {
+    if (request.method !== "POST") {
       return errorResponse(new AstraJevError(405, "method_not_allowed", "Responses endpoint accepts POST requests"));
     }
 
-    if (request.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/models")) {
-      return Response.json({
-        object: "list",
-        data: [{
-          id: ASTRA_JEV_MODEL,
-          object: "model",
-          created: Math.floor(this.options.config.startedAt / 1_000),
-          owned_by: "openai",
-        }],
-      }, { headers: { "cache-control": "no-store" } });
-    }
-
-    if (url.pathname === "/api/status" || url.pathname === "/api/histories" || url.pathname.startsWith("/api/histories/")) {
-      if (!localReadAllowed(request, this.options.config.host)) {
-        return errorResponse(new AstraJevError(403, "origin_not_allowed", "This local read API only accepts loopback same-origin requests"));
-      }
-      return this.handleReadApi(request, url);
-    }
-
-    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/assets/app.js" || url.pathname === "/assets/style.css")) {
-      if (!localReadAllowed(request, this.options.config.host)) {
-        return new Response("Origin not allowed\n", { status: 403, headers: { "content-type": "text/plain; charset=utf-8" } });
-      }
-      return this.handleStatic(url.pathname);
-    }
-
-    return errorResponse(new AstraJevError(404, "not_found", "Astra Jev route not found"));
-  }
-
-  private async handleResponses(request: Request): Promise<Response> {
     let session: HistorySession | undefined;
+    const settings = this.settings;
+    const client = this.jevClient;
     try {
-      if (!this.options.jevClient || !this.options.config.jev.apiKey) {
-        reject(503, "jev_credentials_missing", "Set ASTRA_JEV_JEV_API_KEY or the configured provider API key before sending managed requests");
+      if (!client) {
+        reject(
+          503,
+          "jev_credentials_missing",
+          "Configure an Astra Jev provider API key before selecting Astra Jev",
+        );
       }
-      const body = await readJsonBody(request, this.options.config.maxRequestBytes);
-      validateManagedRequest(body, this.options.config.supportedEfforts);
-      const id = historyIdentity(body, request, this.options.config.upstreamBaseUrl);
-      session = await this.options.historyStore.begin({
+      if (new TextEncoder().encode(JSON.stringify(body)).byteLength > this.config.maxRequestBytes) {
+        reject(413, "request_too_large", `Request body exceeds the ${this.config.maxRequestBytes}-byte limit`);
+      }
+      validateManagedRequest(body, settings.supportedEfforts);
+      const id = historyIdentity(body, request);
+      session = await this.historyStore.begin({
         id,
         body,
-        supportedEfforts: this.options.config.supportedEfforts,
+        supportedEfforts: [...settings.supportedEfforts],
       }, request.signal);
-      const prepared = await session.prepare(context => this.options.jevClient.decide(context, request.signal));
+      const prepared = await session.prepare(context => client!.decide(context, request.signal));
+      const upstreamBody = { ...prepared.body, model: ASTRA_JEV_UPSTREAM_MODEL };
 
       let upstream: Response;
       try {
-        upstream = await this.fetchUpstream(upstreamResponsesUrl(request, this.options.config.upstreamBaseUrl), {
-          method: "POST",
-          headers: forwardedRequestHeaders(request, this.options.config),
-          body: JSON.stringify(prepared.body),
-          signal: request.signal,
-          redirect: "error",
-        });
+        upstream = await forward(request, upstreamBody);
       } catch (error) {
         session.abort();
         if (request.signal.aborted) {
           return errorResponse(new AstraJevError(499, "request_cancelled", "Astra Jev request was cancelled"));
         }
-        throw new AstraJevError(502, "upstream_error", `Responses upstream request failed: ${error instanceof Error ? error.message : "network failure"}`);
+        throw new AstraJevError(
+          502,
+          "upstream_error",
+          "Responses upstream request failed: " + (error instanceof Error ? error.message : "network failure"),
+        );
       }
 
       if (!upstream.ok) {
@@ -503,7 +427,7 @@ export class AstraJevProxy {
         upstream.body,
         request.signal,
         upstream.headers.get("content-type") || "",
-        this.options.config.maxPreviewChars,
+        this.config.maxPreviewChars,
         output => session?.complete(output),
         () => session?.abort(),
       );
@@ -521,51 +445,28 @@ export class AstraJevProxy {
     }
   }
 
-  private async handleReadApi(request: Request, url: URL): Promise<Response> {
-    if (request.method !== "GET") {
-      return errorResponse(new AstraJevError(405, "method_not_allowed", "History APIs accept GET requests"));
-    }
-    this.options.historyStore.sweep();
-    if (url.pathname === "/api/status") {
-      return Response.json({
-        name: this.options.config.serviceName,
-        upstreamBaseUrl: this.options.config.upstreamBaseUrl,
-        retentionHours: this.options.config.retentionHours,
-        latestMessageLimit: this.options.config.latestMessageLimit,
-        historiesCount: this.options.historyStore.list().length,
-        startedAt: this.options.config.startedAt,
-      }, { headers: { "cache-control": "no-store" } });
-    }
-    if (url.pathname === "/api/histories") {
-      const histories: HistorySummary[] = this.options.historyStore.list();
-      return Response.json({ histories }, { headers: { "cache-control": "no-store" } });
-    }
-    const rawId = url.pathname.slice("/api/histories/".length);
-    let id: string;
+  private createClient(settings: ReturnType<AstraJevSettingsStore["snapshot"]>): JevClient | undefined {
+    if (!settings.apiKey) return undefined;
     try {
-      id = decodeURIComponent(rawId);
+      return new JevClient({
+        provider: settings.provider,
+        apiKey: settings.apiKey,
+        timeoutMs: settings.timeoutMs,
+      });
     } catch {
-      return errorResponse(new AstraJevError(400, "invalid_history_id", "History id is not valid URL encoding"));
+      return undefined;
     }
-    const detail: HistoryDetail | undefined = this.options.historyStore.get(id);
-    if (!detail) return errorResponse(new AstraJevError(404, "history_not_found", "History is missing or expired"));
-    return Response.json(detail, { headers: { "cache-control": "no-store" } });
-  }
-
-  private async handleStatic(pathname: string): Promise<Response> {
-    const relative = pathname === "/" ? "index.html" : pathname.slice("/assets/".length);
-    const allowed = new Set(["index.html", "app.js", "style.css"]);
-    if (!allowed.has(relative)) return new Response("Not found\n", { status: 404 });
-    const file = Bun.file(join(this.uiDirectory, relative));
-    if (!(await file.exists())) return new Response("Astra Jev UI asset is unavailable\n", { status: 503 });
-    return new Response(file, { headers: { "content-type": contentTypeFor(relative), "cache-control": "no-store" } });
   }
 }
 
-export function createAstraJevProxy(options: AstraJevProxyOptions): AstraJevProxy {
-  return new AstraJevProxy(options);
+export function createAstraJevService(options: AstraJevServiceOptions = {}): AstraJevService {
+  return new AstraJevService(options);
 }
 
 export function formatAstraJevError(error: unknown): Response {
   return errorResponse(error);
+}
+
+export function astraJevErrorResponse(status: number, code: string, message: string): Response {
+  return errorResponse(new AstraJevError(status, code, message));
 }

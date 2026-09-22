@@ -3,6 +3,7 @@ import type { SVGProps } from "react";
 export type IconName =
   | "activity"
   | "alert"
+  | "astraJev"
   | "back"
   | "browser"
   | "check"
@@ -31,6 +32,7 @@ export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGEle
     <svg aria-hidden="true" viewBox="0 0 24 24" {...props}>
       {name === "activity" ? <><path {...common} d="M3 12h4l2.2-6 4.1 12 2.3-6H21" /></> : null}
       {name === "alert" ? <><path {...common} d="M10.3 4.2 2.8 17.1A2 2 0 0 0 4.5 20h15a2 2 0 0 0 1.7-2.9L13.7 4.2a2 2 0 0 0-3.4 0Z" /><path {...common} d="M12 9v4M12 16.5h.01" /></> : null}
+      {name === "astraJev" ? <><path {...common} d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z" /><path {...common} d="M19 16v5M16.5 18.5h5" /></> : null}
       {name === "back" ? <path {...common} d="m14.5 6-6 6 6 6" /> : null}
       {name === "browser" ? <><rect {...common} x="3" y="4" width="18" height="16" rx="3" /><path {...common} d="M3 9h18M7 6.5h.01M10 6.5h.01" /></> : null}
       {name === "check" ? <path {...common} d="m5 12.5 4.2 4.2L19 7" /> : null}
