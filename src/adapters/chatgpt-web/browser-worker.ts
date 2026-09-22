@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { installChatGptRateLimitHandler, chatGptRateLimitProtocol } from "../../../launcher/electron/chatgpt-rate-limit-preload.cjs";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
@@ -731,32 +732,72 @@ export class ChatGptPromptAttachmentIntegrityError extends ChatGptWebAdapterErro
   }
 }
 
-const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
-  .filter({ hasText: /Too many requests|太多要求|太多请求|リクエストが多すぎます|요청이 너무 많습니다|요청을 너무 빠르게|너무 많은 요청/i })
-  .filter({ hasText: /making requests too quickly|過於頻繁|过于频繁|リクエストの頻度が高すぎます|요청을 너무 빠르게|요청이 너무 많습니다|너무 많은 요청/i })
-  .last();
+const chatGptRateLimitNotice = (page: Page): Locator => page.locator(
+  `#${chatGptRateLimitProtocol.stateId}[data-unhandled="true"], #${chatGptRateLimitProtocol.stateId}[data-pending="true"]`,
+);
 
-export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
-  const dialog = chatGptRateLimitDialog(page);
-  if (!await dialog.isVisible().catch(() => false)) return;
+const chatGptRateLimitInstalledPages = new WeakSet<Page>();
 
-  const acknowledge = dialog.getByRole("button", { name: /^(Got it|知道了|了解|알겠습니다|확인)$/ }).last();
-  if (await acknowledge.isVisible().catch(() => false)) {
-    try {
-      await acknowledge.press("Enter");
-    } catch (error) {
-      throw new ChatGptWebAdapterError(
-        `ChatGPT rate limit: too many requests, and the dialog could not be dismissed (${error instanceof Error ? error.message : String(error)}). Try again in a few minutes.`,
-        { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false },
-      );
-    }
+async function installChatGptRateLimitHandlerOnPage(page: Page): Promise<void> {
+  if (!chatGptRateLimitInstalledPages.has(page)) {
+    await page.addInitScript(installChatGptRateLimitHandler, chatGptRateLimitProtocol);
+    chatGptRateLimitInstalledPages.add(page);
   }
-  // Dismissing the modal does not prove the account cooldown has cleared. Keep this failure
-  // replayable in the adapter so native reconnects cannot start more browser submissions.
-  throw new ChatGptWebAdapterError(
-    "ChatGPT rate limit: too many requests. Try again in a few minutes.",
+  await page.evaluate(installChatGptRateLimitHandler, chatGptRateLimitProtocol);
+}
+
+async function beginChatGptRateLimitAttempt(page: Page): Promise<void> {
+  const previous = await page.evaluate(protocol => {
+    const state = document.getElementById(protocol.stateId);
+    return {
+      revision: Number(state?.getAttribute("data-revision") ?? 0),
+      pending: state?.getAttribute("data-pending") === "true",
+    };
+  }, chatGptRateLimitProtocol);
+  await installChatGptRateLimitHandlerOnPage(page);
+  await page.evaluate(({ protocol, previous }) => {
+    document.dispatchEvent(new Event(protocol.scanEvent));
+    const state = document.getElementById(protocol.stateId);
+    // Retire only notices already closed before this attempt. Installation may itself
+    // discover and close a new modal; its newer revision must remain unhandled.
+    if (state && !previous.pending) {
+      state.setAttribute("data-consumed", String(previous.revision));
+      state.setAttribute("data-unhandled", String(Number(state.getAttribute("data-revision")) > previous.revision));
+    }
+  }, { protocol: chatGptRateLimitProtocol, previous });
+  await throwIfChatGptRateLimitDialog(page);
+}
+
+async function readChatGptRateLimitState(page: Page) {
+  return await page.evaluate(protocol => {
+    document.dispatchEvent(new Event(protocol.scanEvent));
+    const state = document.getElementById(protocol.stateId);
+    return {
+      unhandled: Number(state?.getAttribute("data-revision") ?? 0) > Number(state?.getAttribute("data-consumed") ?? 0),
+      pending: state?.getAttribute("data-pending") === "true",
+      closeFailed: state?.getAttribute("data-close-failed") === "true",
+    };
+  }, chatGptRateLimitProtocol);
+}
+
+function chatGptRateLimitError(closeFailed = false): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    `ChatGPT rate limit: too many requests.${closeFailed ? " The dialog could not be dismissed." : ""} Try again in a few minutes.`,
     { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false },
   );
+}
+
+export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
+  await installChatGptRateLimitHandlerOnPage(page);
+  let state = await readChatGptRateLimitState(page);
+  if (!state.unhandled && !state.pending) return;
+  const deadline = Date.now() + chatGptRateLimitProtocol.closeTimeoutMs;
+  while (state.pending && !state.closeFailed && Date.now() < deadline) {
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
+    state = await readChatGptRateLimitState(page);
+  }
+  // Acknowledging a modal is not evidence that the server accepted this request.
+  throw chatGptRateLimitError(state.pending || state.closeFailed);
 }
 
 const chatGptTemporaryChatOnboardingDialog = (page: Page): Locator => page
@@ -2461,8 +2502,10 @@ export class ChatGptBrowserWorker {
     try {
       const ready = await Promise.race([
         currentEffort.waitFor({ state: "visible", timeout: 70_000, signal: effortWaitAbort.signal }).then(() => "effort" as const),
+        chatGptRateLimitNotice(page).waitFor({ state: "attached", timeout: 70_000, signal: effortWaitAbort.signal }).then(() => "rate-limit" as const),
         chatGptExpiredSessionAlert(page).waitFor({ state: "visible", timeout: 70_000, signal: effortWaitAbort.signal }).then(() => "session-expired" as const),
       ]);
+      if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
       if (ready === "session-expired") await throwIfChatGptSessionFailureAlert(page);
     } catch (error) {
       if (error instanceof ChatGptWebAdapterError) throw error;
@@ -2490,7 +2533,7 @@ export class ChatGptBrowserWorker {
         sliderContainer.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
           .then(() => effortSlider.waitFor({ state: "attached", timeout: 70_000, signal: waitAbort.signal }))
           .then(() => "slider" as const),
-        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
+        chatGptRateLimitNotice(page).waitFor({ state: "attached", timeout: 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
         chatGptExpiredSessionAlert(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "session-expired" as const),
       ]);
       if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
@@ -2649,6 +2692,7 @@ export class ChatGptBrowserWorker {
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
   ): Promise<Locator> {
+    await beginChatGptRateLimitAttempt(page);
     // Launcher verification refreshes its owned page before attaching Playwright so a newly added
     // connector is present in the catalog. Navigating again here destroys that freshly hydrated
     // document and made the first verification race a second SPA bootstrap. A leased turn starts on
@@ -2751,7 +2795,6 @@ export class ChatGptBrowserWorker {
       }
       if (progress && progress.lastToolBatchRevision > initialToolBatchRevision) return "mcp_tool_call";
       await throwIfChatGptSessionFailureAlert(page);
-      await throwIfChatGptRateLimitDialog(page);
       // Until the new response is bound, last() can still be a historical failed answer.
       // Response errors are checked against the bound current turn in the observation loops.
       let evidence: ChatGptSubmissionEvidence | undefined;
@@ -2775,6 +2818,20 @@ export class ChatGptBrowserWorker {
         evidence = await this.currentSubmissionEvidence(page, baseline, signal);
       }
       if (evidence) return evidence;
+      // Check only after DOM and external acceptance evidence; a concurrently closed
+      // notice must not turn an accepted submission into a failed, replayable request.
+      if ((externalProgress?.snapshot().lastToolBatchRevision ?? 0) > initialToolBatchRevision) return "mcp_tool_call";
+      try {
+        await throwIfChatGptRateLimitDialog(page);
+      } catch (error) {
+        if (!(error instanceof ChatGptWebAdapterError) || error.code !== "rate_limit_exceeded") throw error;
+        // The close animation can finish after acceptance becomes visible. Take a fresh
+        // read before deciding that this attempt failed; never activate Send again here.
+        const accepted = await this.currentSubmissionEvidence(page, baseline, signal);
+        if (accepted) return accepted;
+        if ((externalProgress?.snapshot().lastToolBatchRevision ?? 0) > initialToolBatchRevision) return "mcp_tool_call";
+        throw error;
+      }
       await this.waitForTurnDomOrExternalProgress(
         page,
         progress?.revision ?? 0,
@@ -2949,7 +3006,6 @@ export class ChatGptBrowserWorker {
         throw new Error("ChatGPT web turn timed out");
       }
       await throwIfChatGptSessionFailureAlert(observationPage);
-      await throwIfChatGptRateLimitDialog(observationPage);
       let state: ChatGptSubmissionDomState;
       try {
         state = await this.submissionDomState(
@@ -3542,14 +3598,33 @@ export class ChatGptBrowserWorker {
     await captureDiagnostic?.("send-ready");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
     await submissionLifecycle?.onSendActivated?.();
-    await sendButton.press("Enter", {
-      noWaitAfter: true,
-      signal: abortSignal,
-      // runStage owns the operation budget. A second Locator timeout would silently collapse the
-      // 180-second Bigger Context budget back to the ordinary 20 seconds after Enter has already
-      // submitted the message; semantic submission evidence below remains the authority.
-      timeout: 0,
-    });
+    for (;;) {
+      const activation = await sendButton.evaluate((element, protocol) => {
+        document.dispatchEvent(new Event(protocol.scanEvent));
+        const state = document.getElementById(protocol.stateId);
+        if (state?.getAttribute("data-pending") === "true"
+          || Number(state?.getAttribute("data-revision") ?? 0) > Number(state?.getAttribute("data-consumed") ?? 0)) {
+          return "rate-limit" as const;
+        }
+        if (!(element instanceof HTMLButtonElement)
+          || !element.isConnected || element.matches(":disabled") || element.getAttribute("aria-disabled") === "true"
+          || element.getClientRects().length === 0 || getComputedStyle(element).visibility !== "visible"
+          || element.closest('[hidden], [aria-hidden="true"], [data-state="closed"]')) {
+          return "unavailable" as const;
+        }
+        // Inspection and activation share one JavaScript task: neither an observer callback
+        // nor modal focus restoration can interleave them. Never retry a thrown evaluation.
+        element.click();
+        return "clicked" as const;
+      }, chatGptRateLimitProtocol, { timeout: 0, signal: abortSignal });
+      if (activation === "rate-limit") await throwIfChatGptRateLimitDialog(page);
+      if (activation === "clicked") break;
+      // An explicit unavailable result proves this evaluation did not click. Re-resolving
+      // this one control is safe; an exception or lost transport never reaches this retry.
+      if (Date.now() >= sendEnableDeadline) throw new Error("ChatGPT send button became unavailable before activation");
+      if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      await settleChatGptUi();
+    }
     const evidence = await this.waitForSubmissionAcceptedWithRecovery(
       page,
       baseline,
@@ -3734,6 +3809,8 @@ export class ChatGptBrowserWorker {
         );
         return;
       } catch (error) {
+        throwIfPromptAttachmentAborted(abortSignal);
+        await throwIfChatGptRateLimitDialog(page);
         if (!retryAvailable || !(error instanceof ChatGptPromptAttachmentIntegrityError)) throw error;
         retryAvailable = false;
         const evidence = await this.currentSubmissionEvidence(page, baseline, abortSignal);
@@ -4498,6 +4575,7 @@ export class ChatGptBrowserWorker {
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
     const submissionRejection = new ChatGptSubmissionRejectionObserver();
+    let submissionActivated = false;
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       // Validate only the selected physical message, not canonical history used for usage estimates.
@@ -4706,6 +4784,7 @@ export class ChatGptBrowserWorker {
           + ` maxStageMessageTokens=${maxStageMessageTokens} maxStageChars=${maxStageChars}`,
         );
       }
+      if (reuseConversation) await beginChatGptRateLimitAttempt(page);
       if (!reuseConversation) {
         await this.runStage(
           turn.traceId,
@@ -4734,6 +4813,10 @@ export class ChatGptBrowserWorker {
       if (prepared.multipart && multipartStages && multipartTransactionId && multipartFinalPrompt) {
         for (let index = 0; index < multipartStages.length; index += 1) {
           const stage = multipartStages[index]!;
+          if (index > 0) {
+            await beginChatGptRateLimitAttempt(page);
+            submissionActivated = false;
+          }
           let stageBaseline = await this.captureSubmissionBaseline(page);
           await this.runStage(
             turn.traceId,
@@ -4762,6 +4845,7 @@ export class ChatGptBrowserWorker {
               undefined,
               { onSendActivated: async () => {
                 await this.assertSelectedEffort(page, mode);
+                submissionActivated = true;
                 submissionRejection.begin(page);
               } },
               undefined,
@@ -4820,6 +4904,8 @@ export class ChatGptBrowserWorker {
           await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
           await turn.onMultipartStageAcknowledged?.(index + 1);
         }
+        await beginChatGptRateLimitAttempt(page);
+        submissionActivated = false;
         if (mode.effort !== requestedMode.effort) {
           mode = await this.runStage(
             turn.traceId,
@@ -4870,6 +4956,8 @@ export class ChatGptBrowserWorker {
           );
           break;
         } catch (error) {
+          throwIfPromptAttachmentAborted(turn.abortSignal);
+          await throwIfChatGptRateLimitDialog(page);
           if (!(error instanceof ChatGptConnectorCatalogStaleError) || !catalogRefreshAvailable) throw error;
           catalogRefreshAvailable = false;
           await diagnostics.capture(page, "connector-catalog-stale");
@@ -4916,6 +5004,7 @@ export class ChatGptBrowserWorker {
           turn.externalProgress,
           { ...turn, onSendActivated: async () => {
             await this.assertSelectedEffort(page, mode);
+            submissionActivated = true;
             submissionRejection.begin(page);
             await turn.onSendActivated?.();
           } },
@@ -5241,6 +5330,13 @@ export class ChatGptBrowserWorker {
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")
         && !(error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")) {
+        if (!submissionActivated && diagnosticPage && !diagnosticPage.isClosed()) {
+          try {
+            await throwIfChatGptRateLimitDialog(diagnosticPage);
+          } catch (dialogError) {
+            if (dialogError instanceof ChatGptWebAdapterError && dialogError.code === "rate_limit_exceeded") error = dialogError;
+          }
+        }
         error = await submissionRejection.failure() ?? error;
       }
       if (error instanceof DOMException && error.name === "AbortError"
