@@ -33,17 +33,6 @@ test("daemon streams browser lifecycle through the real helper process", async (
       turn.onReasoningSummary("Reading project");
       turn.onReasoningSummary(" files", true);
       turn.onTextDelta("done");
-      if (turn.captureLunaCheckpoint) turn.onLunaCheckpoint({
-        answerHash: "a".repeat(64),
-        checkpoint: {
-          version: 1,
-          objective: "Finish the helper test.",
-          state: ["The answer streamed."],
-          evidence: ["The helper emitted a checkpoint event."],
-          decisions: [],
-          pending: [],
-        },
-      });
       return "done";
     };
     await import(${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-helper-main.ts", import.meta.url).href)});
@@ -81,7 +70,6 @@ test("daemon streams browser lifecycle through the real helper process", async (
   };
   const reasoning: Array<{ text: string; continuation: boolean }> = [];
   const deltas: string[] = [];
-  const checkpoints: unknown[] = [];
   const acknowledgedStages: number[] = [];
   let sendActivated = false;
   let submitted = false;
@@ -106,8 +94,6 @@ test("daemon streams browser lifecycle through the real helper process", async (
       onSubmitted: () => { submitted = true; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
       onTextDelta: text => deltas.push(text),
-      captureLunaCheckpoint: true,
-      onLunaCheckpoint: checkpoint => checkpoints.push(checkpoint),
     });
     expect(result).toBe("done");
     expect(reasoning).toEqual([
@@ -118,17 +104,6 @@ test("daemon streams browser lifecycle through the real helper process", async (
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
     expect(acknowledgedStages).toEqual([1, 2, 3, 4, 5]);
-    expect(checkpoints).toEqual([{
-      answerHash: "a".repeat(64),
-      checkpoint: {
-        version: 1,
-        objective: "Finish the helper test.",
-        state: ["The answer streamed."],
-        evidence: ["The helper emitted a checkpoint event."],
-        decisions: [],
-        pending: [],
-      },
-    }]);
     expect(released).toBe(true);
   } finally {
     await client.close();

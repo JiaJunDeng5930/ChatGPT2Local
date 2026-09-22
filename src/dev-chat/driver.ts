@@ -34,16 +34,14 @@ export type DevChatEvent =
   | { type: "text"; text: string }
   | { type: "tool_call"; name: string; input: unknown }
   | { type: "tool_result"; name: string; receipt: Record<string, unknown> }
-  | { type: "compaction_start"; reason: "automatic" | "manual"; inputItems: number }
-  | { type: "compaction_done"; reason: "automatic" | "manual"; inputItems: number };
+  | { type: "compaction_start"; reason: "manual"; inputItems: number }
+  | { type: "compaction_done"; reason: "manual"; inputItems: number };
 
 export interface DevContextStatus {
   model: DevChatModel;
   inputTokens: number;
-  autoCompactTokenLimit: number;
-  contextWindow: number;
-  browserInputTokenLimit?: number;
-  percent: number;
+  inputTokenLimit: number;
+  remainingTokens: number;
   inputItems: number;
 }
 
@@ -397,7 +395,6 @@ export function createLauncherDevAdapter(
       ...(browserHelperScriptPath ? { browserHelperScriptPath } : {}),
       browserDiagnosticsPath: join(runtimeStateRoot, "diagnostics", "browser-turns"),
       threadEnvironmentStatePath: join(runtimeStateRoot, "thread-environments.json"),
-      lunaCheckpointStatePath: join(runtimeStateRoot, "luna-checkpoints.json"),
       turnTimeoutMs: 60 * 60_000,
       experimentalSkillAttachments: config.experimentalSkillAttachments,
       ...(config.experimentalBiggerContext
@@ -472,7 +469,7 @@ export class DevChatDriver {
     emit: (event: DevChatEvent) => void = () => {},
   ): Promise<DevContextStatus> {
     if (state.input.length === 0) throw new Error("DEV chat has no history to compact");
-    const output = await this.compactInput(state, state.input, "manual", emit);
+    const output = await this.compactInput(state, state.input, emit);
     state.input = output;
     state.compactions += 1;
     this.store.save(state);
@@ -488,24 +485,7 @@ export class DevChatDriver {
     if (!prompt) throw new Error("DEV chat message must not be empty");
     const turnId = id("dev_turn");
     let compactions = 0;
-    let pendingCompactions = 0;
     let workingInput = [...state.input, ...currentTurnItems(this.cwd, turnId, prompt)];
-    let context = this.statusForInput(state, turnId, workingInput);
-
-    if (this.shouldAutoCompact(state, context) && state.input.length > 0) {
-      state.input = await this.compactInput(state, state.input, "automatic", emit);
-      state.compactions += 1;
-      compactions += 1;
-      this.store.save(state);
-      workingInput = [...state.input, ...currentTurnItems(this.cwd, turnId, prompt)];
-      context = this.statusForInput(state, turnId, workingInput);
-    }
-    if (this.shouldAutoCompact(state, context)) {
-      throw new Error(
-        `DEV turn still requires ${context.inputTokens.toLocaleString("en-US")} tokens after compaction; `
-        + `the selected mode compacts at ${context.autoCompactTokenLimit.toLocaleString("en-US")}`,
-      );
-    }
 
     let totalToolCalls = 0;
     const usage: DevChatUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
@@ -537,7 +517,6 @@ export class DevChatDriver {
         finalText = outputText(output);
         state.input = workingInput;
         state.turns += 1;
-        state.compactions += pendingCompactions;
         state.lastUsage = usage;
         this.store.save(state);
         return {
@@ -557,22 +536,12 @@ export class DevChatDriver {
         workingInput.push(toolOutput(call, receipt));
       }
 
-      context = this.statusForInput(state, turnId, workingInput);
-      if (this.shouldAutoCompact(state, context)) {
-        workingInput = await this.compactInput(state, workingInput, "automatic", emit);
-        pendingCompactions += 1;
-        compactions += 1;
-      }
     }
     throw new Error("DEV chat exceeded 64 simulated tool rounds without a final answer");
   }
 
   async close(): Promise<void> {
     await closeChatGptBrowserWorkers();
-  }
-
-  private shouldAutoCompact(state: DevChatState, context: DevContextStatus): boolean {
-    return !isLunaDevChatModel(state.model) && context.inputTokens >= context.autoCompactTokenLimit;
   }
 
   private assertBiggerContextModel(model: DevChatModel): void {
@@ -600,17 +569,14 @@ export class DevChatDriver {
       proAvailable: this.config.proAvailable,
     });
     const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, this.config);
-    const autoCompactTokenLimit = limits.autoCompactTokenLimit;
-    const contextWindow = limits.contextWindow;
+    const inputTokenLimit = route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL
+      ? CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET
+      : limits.contextWindow;
     return {
       model: state.model,
       inputTokens,
-      autoCompactTokenLimit,
-      contextWindow,
-      ...(route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL
-        ? { browserInputTokenLimit: CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET }
-        : {}),
-      percent: Math.round((inputTokens / autoCompactTokenLimit) * 1_000) / 10,
+      inputTokenLimit,
+      remainingTokens: Math.max(0, inputTokenLimit - inputTokens),
       inputItems: input.length,
     };
   }
@@ -618,14 +584,10 @@ export class DevChatDriver {
   private async compactInput(
     state: DevChatState,
     input: unknown[],
-    reason: "automatic" | "manual",
     emit: (event: DevChatEvent) => void,
   ): Promise<unknown[]> {
-    if (isLunaDevChatModel(state.model)) {
-      throw new Error("ChatGPT Web Luna uses its production rolling checkpoint and does not support a separate compact command");
-    }
     const compactTurnId = id("dev_compact_turn");
-    emit({ type: "compaction_start", reason, inputItems: input.length });
+    emit({ type: "compaction_start", reason: "manual", inputItems: input.length });
     const response = await compactRequest(new Request("http://codex-web-gpt.dev/v1/responses/compact", {
       method: "POST",
       headers: {
@@ -651,7 +613,7 @@ export class DevChatDriver {
     if (!Array.isArray(body.output) || body.output.length === 0) {
       throw new Error("DEV compaction returned no replacement history");
     }
-    emit({ type: "compaction_done", reason, inputItems: body.output.length });
+    emit({ type: "compaction_done", reason: "manual", inputItems: body.output.length });
     return body.output;
   }
 }

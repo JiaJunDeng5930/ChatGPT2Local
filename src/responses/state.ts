@@ -53,8 +53,8 @@ function deleteEntry(id: string): void {
 }
 // Expansion provenance must stay proxy-private: a WeakMap distinguishes replayed history from the
 // newly appended input suffix without adding an unknown field that native passthrough could send
-// upstream. Consumers use the prefix length to bind trusted history and rolling checkpoints to the
-// exact replayed portion of this request.
+// upstream. Consumers use the prefix length to bind trusted history and explicit compaction
+// handoffs to the exact replayed portion of this request.
 const replayedInputPrefixLengths = new WeakMap<object, number>();
 let loaded = false;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;

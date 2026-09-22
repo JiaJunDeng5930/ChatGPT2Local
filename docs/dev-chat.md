@@ -45,8 +45,8 @@ bun run dev:chat tool-lab "Use a command tool and explain the simulated receipt"
 
 The direct DEV tool `mcp__dev_simulator__large_context_payload` accepts the explicit arguments
 `segment` (1, 2, or 3) and `target_tokens` (1,000 to 95,000). It returns deterministic, coherent,
-inert prose through the real simulated MCP-result path so a live named chat can exercise retention
-and automatic compaction without embedding a giant fixture in the user prompt. It is advertised
+inert prose through the real simulated MCP-result path so a live named chat can exercise history
+retention and explicit compaction without embedding a giant fixture in the user prompt. It is advertised
 directly rather than through deferred tool search so the test can prove the requested call happened.
 
 Reusing the same name continues its canonical Responses history. Sequential native messages in the
@@ -72,10 +72,9 @@ Interactive commands:
 ```
 
 `/fill N` appends deterministic inert text measured by the production tokenizer. It does not open
-ChatGPT. The next message checks the real model-specific auto-compaction threshold and calls the
-same `compactRequest` handler when the threshold is crossed. `/compact` forces that handler
-immediately. Luna keeps its production rolling-checkpoint contract and therefore rejects the
-separate compact command.
+ChatGPT, and subsequent messages keep the full history without triggering compaction by token
+count. `/compact` explicitly calls the same `compactRequest` handler used by the Responses route.
+Luna rejects that separate compaction request with HTTP 409, matching production.
 
 `/send-fill N` sends deterministic inert text as the current message through the live browser. Use
 it to exercise the one-message composer budget and multi-chunk prompt insertion independently of
@@ -103,14 +102,13 @@ that ChatGPT will follow them more reliably.
 Both launcher profiles expose **Bigger Context (experimental)** in Settings. It is disabled by
 default. The switch updates the profile's canonical runtime configuration through the normal setup
 transaction; it is not a launcher-only preference. Production setup also rewrites the managed
-Codex model catalog with 3x context and auto-compaction thresholds and asks you to restart Codex.
-The DEV CLI reads the same setting from its isolated runtime configuration on each command.
+Codex model catalog and asks you to restart Codex. The DEV CLI reads the same setting from its
+isolated runtime configuration on each command.
 
-When enabled, a normal turn stays on the original single-message path while its estimated input
-is below the selected mode's existing auto-compaction threshold. At the first threshold it uses two
-messages; at twice that threshold it uses six messages. The final context part also commits the
-transaction and starts the task, so there is no extra request. The existing DEV compaction threshold
-remains three times the selected mode's base limit.
+When enabled, the adapter first checks whether the full prompt fits in one message and within the
+measured aggregate browser capacity. If not, it tries two messages, then six. The final context part
+also commits the transaction and starts the task, so there is no extra request. Each choice depends
+only on the compiled messages and measured browser capacities; it does not trigger compaction.
 
 Each stage contains complete semantic records, never a raw JSON string cut in the middle. The model
 must return an exact transaction-bound SHA-256 acknowledgement before the next part is sent.
@@ -129,17 +127,18 @@ and waits for its physical launcher settlement before closing the old surface; t
 starts a fresh Temporary Chat. This does not depend on ChatGPT rendering assistant text or a Copy
 action after the control-only response. If the retained private chat was already closed, the bridge
 starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
-has no retained MCP boundary and uses the six-message compaction path so its summarizer receives
-the complete expanded history.
+has no retained MCP boundary and uses the six-message path for explicit compaction so its summarizer
+receives the complete expanded history.
 
 Any missing or malformed acknowledgement fails the whole transaction. No later part or final
-commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The model context
-and auto-compaction ceilings are reported as 3× while the switch is active, but every individual
-stage must still fit the selected ChatGPT mode's measured one-message boundary.
+commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The adapter's
+aggregate browser capacity scales to 3× while the switch is active, but every individual stage must
+still fit the selected ChatGPT mode's measured one-message boundary. Web model catalog rows do not
+advertise a numeric context window or automatic compaction threshold.
 
 Small turns use one request. Two-part turns use one inert staging request and one final request;
-six-part turns use five staging requests and one final request. Browser-only compaction also uses
-six parts. Inert stages use the fastest available mode that fits their complete messages; the final
+six-part turns use five staging requests and one final request. Browser-only explicit compaction
+also uses six parts. Inert stages use the fastest available mode that fits their complete messages; the final
 part uses the selected execution effort. Large turns may increase the probability of
 rate limits or a temporary account cooldown. The experiment is intentionally unavailable for Luna:
 Luna's later requests still include the accumulated transcript inside the same measured

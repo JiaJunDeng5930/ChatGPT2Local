@@ -17,7 +17,6 @@ import {
   type CompiledChatGptWebPrompt,
   type CompileChatGptWebPromptOptions,
 } from "./prompt";
-import { extractChatGptTurnIdentity } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import type { BrokerToolRequest } from "./turn-broker";
 
@@ -44,7 +43,6 @@ export function estimateChatGptWebInputTokens(
   const mode = manual
     ? { localTools: true }
     : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
-  const identity = extractChatGptTurnIdentity(parsed);
   const compiled = compileChatGptWebPrompt(
     parsed,
     capabilities,
@@ -52,19 +50,12 @@ export function estimateChatGptWebInputTokens(
     {
       ...options,
       ...(manual ? { manualControl: true as const } : {}),
-      captureLunaCheckpoint: parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
-        && !parsed._compactionRequest
-        && Boolean(identity.threadId && identity.turnId),
     },
   );
   return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
 }
 
-/**
- * The compaction threshold chooses the initial part count. Whole records and composer limits
- * can require more parts even when the total token estimate is small. Plan before submission;
- * compaction always receives all six parts without passing through the legacy inline budget.
- */
+/** Choose the least multipart transport that fits the compiled records and measured capacities. */
 export function resolveBiggerContextMultipartParts(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
@@ -78,7 +69,7 @@ export function resolveBiggerContextMultipartParts(
   }
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   if (parsed._compactionRequest) return CHATGPT_BIGGER_CONTEXT_PARTS;
-  const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
+  const { contextWindow } = resolveChatGptWebContextLimits(
     CHATGPT_WEB_BACKEND_MODEL,
     mode.effort,
     { ...capabilities, experimentalBiggerContext: false },
@@ -87,11 +78,6 @@ export function resolveBiggerContextMultipartParts(
     parsed, capabilities, mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
     { experimentalMultipartParts: parts, experimentalSkillAttachments },
   );
-  const inline = compile();
-  const inputTokens = estimateCompiledChatGptWebInputTokens(inline, parsed.modelId);
-  const initialParts = biggerContextPartCount(inputTokens, autoCompactTokenLimit, false);
-  if (initialParts === CHATGPT_BIGGER_CONTEXT_PARTS) return initialParts;
-
   const fits = (compiled: CompiledChatGptWebPrompt): boolean => {
     const messages = compiledChatGptWebMessages(compiled);
     // Inert stages may use any explicitly available staging effort; execution keeps the chosen
@@ -110,19 +96,8 @@ export function resolveBiggerContextMultipartParts(
     return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId)
       < contextWindow * Math.min(messages.length, CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER);
   };
-  if (initialParts === undefined && fits(inline)) return undefined;
+  if (fits(compile())) return undefined;
   return fits(compile(2)) ? 2 : CHATGPT_BIGGER_CONTEXT_PARTS;
-}
-
-export function biggerContextPartCount(
-  inputTokens: number,
-  onePartLimit: number,
-  compaction: boolean,
-): ChatGptWebMultipartPartCount | undefined {
-  if (compaction) return CHATGPT_BIGGER_CONTEXT_PARTS;
-  if (inputTokens < onePartLimit) return undefined;
-  if (inputTokens < onePartLimit * 2) return 2;
-  return CHATGPT_BIGGER_CONTEXT_PARTS;
 }
 
 function roundEvidenceText(evidence: ChatGptWebRoundEvidence): string {

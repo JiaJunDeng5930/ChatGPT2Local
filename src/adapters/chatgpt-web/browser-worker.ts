@@ -88,10 +88,6 @@ import {
   chatGptStoppedThinkingError,
 } from "./adapter-error";
 import {
-  ChatGptLunaCheckpointStream,
-  type CapturedChatGptLunaCheckpoint,
-} from "./rolling-checkpoint";
-import {
   chatGptExternalProgressIsLive,
   chatGptExternalToolCallsAreInFlight,
 } from "./turn-progress";
@@ -973,7 +969,7 @@ export function assertChatGptWebInputWithinLimits(
     && estimatedInputTokens > CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET
   ) {
     throw new ChatGptWebAdapterError(
-      `This Luna turn requires ${estimatedInputTokens.toLocaleString("en-US")} estimated input tokens, which exceeds the measured ${CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET.toLocaleString("en-US")}-token ChatGPT Free browser transport budget. Completed Luna history is already replaced by its rolling checkpoint; the remaining payload is the current Codex turn and cannot be reduced by /compact.`,
+      `This Luna turn requires ${estimatedInputTokens.toLocaleString("en-US")} estimated input tokens, which exceeds the measured ${CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET.toLocaleString("en-US")}-token ChatGPT Free browser transport budget. Luna sends the complete Codex history with each request and does not accept a separate /compact turn. Reduce the task history or use a Web model with a larger browser input budget.`,
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
@@ -1311,9 +1307,6 @@ export interface BrowserTurn {
   };
   /** Allow one clean pre-submit composer retry for isolated history compaction only. */
   compaction?: boolean;
-  /** Require and remove the private Luna checkpoint tail from the visible Markdown stream. */
-  captureLunaCheckpoint?: boolean;
-  onLunaCheckpoint?: (captured: CapturedChatGptLunaCheckpoint) => void;
 }
 
 interface ChatGptSubmissionBaseline {
@@ -4553,12 +4546,6 @@ export class ChatGptBrowserWorker {
     if ((turn.externalProgress !== undefined) !== (turn.completionFence !== undefined)) {
       throw new Error("Tool-capable ChatGPT turns require both progress and terminal-fence transports");
     }
-    if ((turn.captureLunaCheckpoint === true) !== (turn.onLunaCheckpoint !== undefined)) {
-      throw new Error("ChatGPT Luna checkpoint capture requires exactly one checkpoint callback");
-    }
-    if (turn.captureLunaCheckpoint && turn.modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
-      throw new Error("Private rolling checkpoint capture is valid only for ChatGPT Luna");
-    }
     const browserCapabilities = turn.nativeConnector
       ? { ...turn.capabilities, localToolsEnabled: true }
       : turn.capabilities;
@@ -5045,12 +5032,8 @@ export class ChatGptBrowserWorker {
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
-      const checkpointStream = turn.captureLunaCheckpoint
-        ? new ChatGptLunaCheckpointStream()
-        : undefined;
       const emitMarkdownDelta = (delta: string): void => {
-        const visible = checkpointStream ? checkpointStream.push(delta) : delta;
-        if (visible) turn.onTextDelta(visible);
+        if (delta) turn.onTextDelta(delta);
       };
       const throwMarkdownConsistencyError = (error: unknown): never => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
@@ -5258,15 +5241,7 @@ export class ChatGptBrowserWorker {
               throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
             }
             if (final.delta) emitMarkdownDelta(final.delta);
-            if (checkpointStream) {
-              const completed = checkpointStream.finishOptional(snapshot.visibleText);
-              if (completed.visibleRemainder) turn.onTextDelta(completed.visibleRemainder);
-              if (completed.captured) turn.onLunaCheckpoint!(completed.captured);
-              else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
-              finalText = completed.answer;
-            } else {
-              finalText = final.markdown;
-            }
+            finalText = final.markdown;
             break;
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 60_000) {

@@ -3,7 +3,6 @@ import { defaultConfig } from "../src/config";
 import {
   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
   CHATGPT_WEB_MODEL_ROUTES,
-  resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
 import { modelsRequest } from "../src/server";
 
@@ -43,10 +42,10 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
   const body = await response.json() as {
     models: Array<{
       slug: string;
-      context_window?: number;
-      max_context_window?: number;
-      effective_context_window_percent?: number;
-      auto_compact_token_limit?: number;
+      context_window?: number | null;
+      max_context_window?: number | null;
+      effective_context_window_percent?: number | null;
+      auto_compact_token_limit?: number | null;
       supported_in_api?: boolean;
       priority?: number;
       multi_agent_version?: string;
@@ -59,18 +58,21 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
     "chatgpt-web/high",
     "chatgpt-web/extra-high",
     "chatgpt-web/pro",
+    "astra-jev",
   ]);
   expect(body.models[0]!.context_window).toBe(300_000);
   expect(body.models[0]!.max_context_window).toBe(371_851);
   expect(body.models[0]!.auto_compact_token_limit).toBe(270_000);
   expect(body.models[0]!.multi_agent_version).toBe("v2");
-  for (const [index, model] of body.models.slice(1).entries()) {
-    const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
-    const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
-    expect(model.context_window).toBe(limits.contextWindow);
-    expect(model.max_context_window).toBe(limits.contextWindow);
-    expect(model.effective_context_window_percent).toBe(limits.effectiveContextWindowPercent);
-    expect(model.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);
+  const webModels = body.models.filter(model => model.slug.startsWith("chatgpt-web/"));
+  for (const [index, model] of webModels.entries()) {
+    expect(model.slug).toBe(CHATGPT_WEB_MODEL_ROUTES[index]!.slug);
+    expect(model).toMatchObject({
+      context_window: null,
+      max_context_window: null,
+      effective_context_window_percent: null,
+      auto_compact_token_limit: null,
+    });
     expect(model.supported_in_api).toBe(true);
     expect(model.priority).toBe(1);
     expect(model.multi_agent_version).toBe("v2");
@@ -137,10 +139,10 @@ test("Zero Risk returns one generic Web row without using scanned capabilities",
     upgrade: null,
     default_reasoning_level: "low",
     input_modalities: ["text"],
-    context_window: 123_000,
-    max_context_window: 123_000,
-    effective_context_window_percent: 78,
-    auto_compact_token_limit: 96_000,
+    context_window: null,
+    max_context_window: null,
+    effective_context_window_percent: null,
+    auto_compact_token_limit: null,
     additional_speed_tiers: [],
     service_tiers: [],
     default_service_tier: null,

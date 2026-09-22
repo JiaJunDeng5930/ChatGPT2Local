@@ -22,8 +22,10 @@ Run this list on a maintained Windows 11 x64 machine with a real ChatGPT account
 4. Complete one Browser-only turn and verify streamed commentary plus the final answer.
 5. Configure the `Codex Native2` connector, run **Verify runtime**, and complete one Full-mode local
    tool turn. Repeat with Pro when the account exposes Pro.
-6. Drive a chat past the compaction threshold and prove that it continues after compaction without
-   a duplicate or orphaned browser turn.
+6. Send a chat past the former automatic-compaction threshold and verify that the Web adapter keeps
+   the full history without compacting automatically. Then issue an explicit `/responses/compact`
+   request and prove that the compacted continuation completes without a duplicate or orphaned
+   browser turn. Verify that Luna rejects a separate compaction request with HTTP 409.
 7. On a clean install, prove that setup offers both interaction modes and defaults to With
    Automation. Select Zero Risk and prove that Codex shows exactly one generic Web model after
    restart, a retained chat receives only the next prompt, and

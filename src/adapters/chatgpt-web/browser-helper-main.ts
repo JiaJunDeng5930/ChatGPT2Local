@@ -32,7 +32,6 @@ interface RunMessage {
     requireRetainedConversation?: boolean;
     conversationKey?: string;
     compaction?: boolean;
-    captureLunaCheckpoint?: boolean;
     externalProgress?: boolean;
   };
 }
@@ -172,9 +171,6 @@ async function run(message: RunMessage): Promise<void> {
   if (message.turn.compaction !== undefined && typeof message.turn.compaction !== "boolean") {
     throw new Error("Browser helper compaction flag is invalid");
   }
-  if (message.turn.captureLunaCheckpoint !== undefined && typeof message.turn.captureLunaCheckpoint !== "boolean") {
-    throw new Error("Browser helper Luna checkpoint flag is invalid");
-  }
   if (message.turn.externalProgress !== undefined && typeof message.turn.externalProgress !== "boolean") {
     throw new Error("Browser helper external progress flag is invalid");
   }
@@ -288,15 +284,6 @@ async function run(message: RunMessage): Promise<void> {
     }),
     onCommentary: (text, continuation) => writeProtocol({ type: "event", id: message.id, event: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
     onTextDelta: text => writeProtocol({ type: "event", id: message.id, event: "text", text }),
-    ...(message.turn.captureLunaCheckpoint ? {
-      captureLunaCheckpoint: true,
-      onLunaCheckpoint: captured => writeProtocol({
-        type: "event",
-        id: message.id,
-        event: "luna_checkpoint",
-        ...captured,
-      }),
-    } : {}),
   };
   try {
     const text = await ChatGptBrowserWorker.forProvider(provider).run(turn);

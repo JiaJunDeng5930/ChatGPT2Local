@@ -1285,7 +1285,6 @@ describe("ChatGPT outer-native harness v4", () => {
         experimentalBiggerContext: true,
         solAvailable: false,
         threadEnvironmentStatePath: join(tempRoot, "prepare-error-environment.json"),
-        lunaCheckpointStatePath: join(tempRoot, "prepare-error-checkpoint.json"),
       },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -1350,16 +1349,14 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
-  test("a missing optional Luna checkpoint completes once without repeating the browser turn", async () => {
-    const checkpointPath = join(tempRoot, `missing-luna-checkpoint-${Date.now()}.json`);
+  test("Luna sends complete native history on each browser turn", async () => {
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
-      baseUrl: `browser://chatgpt-luna-missing-checkpoint-${Date.now()}`,
+      baseUrl: `browser://chatgpt-luna-full-history-${Date.now()}`,
       chatgptWeb: {
         localToolsEnabled: false,
         solAvailable: false,
         extraHighAvailable: false, proAvailable: false,
-        lunaCheckpointStatePath: checkpointPath,
       },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -1369,7 +1366,10 @@ describe("ChatGPT outer-native harness v4", () => {
       browserStarts += 1;
       const prepared = await turn.prepare();
       try {
-        expect(turn.captureLunaCheckpoint).toBeTrue();
+        expect(prepared.text).toContain("prior Luna user evidence");
+        expect(prepared.text).toContain("prior Luna assistant answer");
+        expect(prepared.text).toContain("current Luna task");
+        expect(prepared.text).not.toContain("CODEXLUNAPRIVATECHECKPOINT");
         const answer = "Luna completed the requested task.";
         turn.onTextDelta(answer);
         return answer;
@@ -1381,21 +1381,23 @@ describe("ChatGPT outer-native harness v4", () => {
     const request = rawWireRequest(environmentXml);
     request.modelId = "gpt-5.6-luna";
     request.options.reasoning = "low";
+    request.context.messages = [
+      { role: "user", content: "prior Luna user evidence", timestamp: 1 },
+      { role: "assistant", content: [{ type: "text", text: "prior Luna assistant answer" }], timestamp: 2 },
+      { role: "user", content: "current Luna task", timestamp: 3 },
+    ];
     const adapter = createChatGptWebAdapter(provider);
     try {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const events: AdapterEvent[] = [];
-        await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
-        expect(events.filter(event => event.type === "text_delta" && event.phase === "final_answer")).toEqual([{
-          type: "text_delta",
-          text: "Luna completed the requested task.",
-          phase: "final_answer",
-        }]);
-        expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
-        expect(events.some(event => event.type === "error")).toBeFalse();
-      }
+      const events: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      expect(events.filter(event => event.type === "text_delta" && event.phase === "final_answer")).toEqual([{
+        type: "text_delta",
+        text: "Luna completed the requested task.",
+        phase: "final_answer",
+      }]);
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+      expect(events.some(event => event.type === "error")).toBeFalse();
       expect(browserStarts).toBe(1);
-      expect(existsSync(checkpointPath)).toBeFalse();
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     }

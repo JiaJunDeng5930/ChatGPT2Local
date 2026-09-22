@@ -590,7 +590,7 @@ export async function responseRequest(
     return formatErrorResponse(
       409,
       "invalid_request_error",
-      "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.",
+      "ChatGPT Web Luna does not support a separate compaction turn.",
     );
   }
   if (compaction) {
@@ -779,7 +779,7 @@ export async function compactRequest(
     return formatErrorResponse(
       409,
       "invalid_request_error",
-      "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.",
+      "ChatGPT Web Luna does not support a separate compaction turn.",
     );
   }
   const input = Array.isArray(raw.input) ? raw.input : [];

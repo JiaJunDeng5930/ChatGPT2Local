@@ -441,8 +441,7 @@ test("Luna rejects separate native compaction instead of opening another browser
   expect(response.status).toBe(409);
   expect(adapterStarted).toBeFalse();
   const body = await response.json() as { error: { message: string } };
-  expect(body.error.message).toContain("rolling checkpoint");
-  expect(body.error.message).toContain("separate Codex compaction is disabled");
+  expect(body.error.message).toContain("does not support a separate compaction turn");
 });
 
 test("Luna rejects a remote-v2 compaction trigger before opening another browser turn", async () => {
@@ -470,7 +469,7 @@ test("Luna rejects a remote-v2 compaction trigger before opening another browser
   expect(response.status).toBe(409);
   expect(adapterStarted).toBeFalse();
   const body = await response.json() as { error: { message: string } };
-  expect(body.error.message).toContain("rolling checkpoint");
+  expect(body.error.message).toContain("does not support a separate compaction turn");
 });
 
 test("rejects Pro-only routed models before opening a browser when the account has no Pro access", async () => {

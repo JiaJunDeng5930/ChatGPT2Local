@@ -57,9 +57,10 @@ connector reaches the same MCP server and turn-token contract without requiring 
 daemon or colliding with the production `Codex Native2` connector.
 
 Only the responsibilities normally owned by native Codex are synthetic: named history storage,
-turn metadata, tool-result execution, context-threshold scheduling, and installation of compacted
-replacement history. Every tool result is an explicit `simulated: true` receipt with
-`side_effects_performed: false`; no semantic router guesses a command result.
+turn metadata, tool-result execution, and installation of explicitly compacted replacement history.
+DEV never schedules compaction from an input-token threshold. Every tool result is an explicit
+`simulated: true` receipt with `side_effects_performed: false`; no semantic router guesses a command
+result.
 
 The driver calls `responseRequest` and `compactRequest` directly. It starts no HTTP server, does not
 read or write Codex's route journal or `config.toml`, and does not stop or replace the normal
@@ -124,29 +125,29 @@ The pasted task carries one opaque `request_id` for routing concurrent requests.
 sequencing lives in the Zero Risk MCP server metadata, not in user-authored imperative text; the
 per-tab nonce used to validate the Launcher confirmation never leaves the local runtime.
 
-The appended models advertise the authenticated account's context window and a ten-percent
-auto-compaction reserve. Usage is counted with the GPT-5 tokenizer plus fixed platform/image
-reserves, rather than inferred from character length. The ChatGPT composer also has an independent
-inline-size boundary: usage accounting asks Codex to compact before that boundary, and a prompt
-that still exceeds the proven hard ceiling fails explicitly before any browser turn opens.
-Top-level `model_context_window` raises only the proxied native rows' advertised maximum, allowing
-Codex to apply its own configured context override without clamping. Routed ChatGPT Web models
-retain their measured adapter-owned limits.
+Routed ChatGPT Web catalog rows leave their numeric context and automatic-compaction fields unset,
+so Codex does not schedule a Web compaction from a token threshold. The adapter separately counts
+usage with the GPT-5 tokenizer plus fixed platform/image reserves, checks the measured per-message
+composer and token boundaries, and fails before opening a browser turn when physical limits are
+exceeded. Bigger Context scales only the adapter's aggregate browser capacity and uses measured
+message limits to decide whether to send one, two, or six parts. Native rows retain their own context
+catalog behavior, including the top-level `model_context_window` override.
 
 Bigger Context partitions complete ordered records against each message's available token and
 composer budgets. Inert stages carry text; the final message also carries all retained attachments,
 the execution contract and any output schema. Their reserves are deducted before partitioning,
 then preflight checks the actual compiled messages and total transaction. The selected execution
-effort and attachment references remain unchanged. Large transactions use up to six messages;
-the advertised context and compaction thresholds remain three times the base limits. More parts
-reduce message size, not the amount of history retained.
+effort and attachment references remain unchanged. The adapter tries the inline prompt, then two
+parts, then six parts based on measured physical capacity; preflight fails explicitly if six parts
+still exceed it. More parts reduce message size, not the amount of history retained. Explicit
+compaction remains a separate request path and may use the existing six-part summarization flow.
 
-In Full mode, routed compaction v1/v2 uses the exact retained source agent and a one-shot MCP control
-capability that accepts only the bound checkpoint; it cannot claim or invoke the ordinary Codex tool
-environment. Zero Risk always advertises a fixed three-times compaction interval without enabling
-Bigger Context multipart transport. At that boundary its active ChatGPT response receives the
-checkpoint instruction as an MCP result, returns the compacted context through its bound completion
-control, and ends. The old manual chat is retired; the next compacted Codex request owns a fresh
+In Full mode, explicit routed compaction v1/v2 uses the exact retained source agent and a one-shot
+MCP control capability that accepts only the bound checkpoint; it cannot claim or invoke the ordinary
+Codex tool environment. Zero Risk uses its measured browser input capacity and does not enable
+Bigger Context multipart transport. When explicit compaction is requested, its active ChatGPT
+response receives the checkpoint instruction as an MCP result, returns the compacted context through
+its bound completion control, and ends. The old manual chat is retired; the next compacted Codex request owns a fresh
 Temporary Chat and its locally compiled prompt is copied to the clipboard. A missing Automatic
 retained source falls back to a dedicated read-only Temporary Chat built from canonical Codex
 history; a missing Zero Risk source uses the same explicit manual checkpoint contract. An invalid or

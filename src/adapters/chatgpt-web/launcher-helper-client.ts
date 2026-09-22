@@ -6,10 +6,6 @@ import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../lau
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
-import {
-  parseChatGptLunaCheckpoint,
-  type ChatGptLunaCheckpoint,
-} from "./rolling-checkpoint";
 
 interface PendingTurn {
   turn: BrowserTurn;
@@ -31,7 +27,6 @@ type HelperMessage =
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
-  | { type: "event"; id: string; event: "luna_checkpoint"; checkpoint: ChatGptLunaCheckpoint; answerHash: string }
   | { type: "result"; id: string; text: string }
   | {
       type: "error";
@@ -92,18 +87,6 @@ function parseHelperMessage(line: string): HelperMessage {
         event,
         requestId: message.requestId as number,
         revision: message.revision as number,
-      };
-    }
-    if (event === "luna_checkpoint") {
-      if (typeof message.answerHash !== "string" || !/^[a-f0-9]{64}$/.test(message.answerHash)) {
-        throw new Error("Launcher browser helper Luna checkpoint answer hash is invalid");
-      }
-      return {
-        type: "event",
-        id: message.id,
-        event,
-        checkpoint: parseChatGptLunaCheckpoint(message.checkpoint),
-        answerHash: message.answerHash,
       };
     }
     const text = message.text;
@@ -289,7 +272,6 @@ export class LauncherBrowserHelperClient {
             ...(turn.requireRetainedConversation ? { requireRetainedConversation: true } : {}),
             ...(turn.conversationKey ? { conversationKey: turn.conversationKey } : {}),
             ...(turn.compaction ? { compaction: true } : {}),
-            ...(turn.captureLunaCheckpoint ? { captureLunaCheckpoint: true } : {}),
             ...(turn.externalProgress ? { externalProgress: true } : {}),
           },
         })
@@ -542,13 +524,6 @@ export class LauncherBrowserHelperClient {
           error instanceof Error ? error : new Error(String(error)),
           pending,
         ));
-      }
-      else if (message.event === "luna_checkpoint") {
-        if (!pending.turn.captureLunaCheckpoint || !pending.turn.onLunaCheckpoint) {
-          this.finishWithError(message.id, new Error("Launcher browser helper emitted an unexpected Luna checkpoint"));
-          return;
-        }
-        pending.turn.onLunaCheckpoint({ checkpoint: message.checkpoint, answerHash: message.answerHash });
       }
       else if (message.event === "reasoning" && message.text) {
         pending.turn.onReasoningSummary?.(message.text, message.continuation === true);

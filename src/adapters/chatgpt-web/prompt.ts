@@ -11,10 +11,6 @@ import { estimateTokens } from "../../lib/token-estimate";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
 import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import {
-  CHATGPT_LUNA_CHECKPOINT_MARKER,
-  CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
-} from "./rolling-checkpoint";
 
 export interface ChatGptWebPromptImage {
   ref: string;
@@ -33,7 +29,6 @@ export interface CompiledChatGptWebPrompt {
 }
 
 export interface CompileChatGptWebPromptOptions {
-  captureLunaCheckpoint?: boolean;
   experimentalSkillAttachments?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
   /**
@@ -441,15 +436,14 @@ export function compileChatGptWebPrompt(
   const mode = manualControl
     ? { localTools: true, effort: "low" as const, displayLabel: "Zero Risk" as const }
     : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
-  const captureLunaCheckpoint = options?.captureLunaCheckpoint === true;
   const multipartParts = options?.experimentalMultipartParts;
   const multipartEnabled = multipartParts !== undefined;
   if (manualControl) {
     if (!capabilities.localToolsEnabled) {
       throw new Error("ChatGPT Zero Risk requires the Full Codex harness");
     }
-    if (captureLunaCheckpoint || multipartEnabled) {
-      throw new Error("ChatGPT Zero Risk does not support rolling or multipart browser transport");
+    if (multipartEnabled) {
+      throw new Error("ChatGPT Zero Risk does not support multipart browser transport");
     }
   }
   if (multipartParts !== undefined && !isChatGptWebMultipartPartCount(multipartParts)) {
@@ -459,10 +453,7 @@ export function compileChatGptWebPrompt(
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
   }
   if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && parsed._compactionRequest) {
-    throw new Error("ChatGPT Luna uses rolling checkpoints and does not accept a separate compaction turn");
-  }
-  if (captureLunaCheckpoint && (parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID || parsed._compactionRequest)) {
-    throw new Error("Rolling checkpoints are supported only for normal ChatGPT Luna turns");
+    throw new Error("ChatGPT Web Luna does not accept a separate compaction turn");
   }
   if (mode.localTools && !turnToken) {
     throw new Error(manualControl
@@ -543,17 +534,6 @@ export function compileChatGptWebPrompt(
       ]
       : []),
   ];
-  const checkpointContract = captureLunaCheckpoint
-    ? [
-      "After the complete user-facing answer, append one private rolling task checkpoint for the next Luna turn.",
-      `Append the exact marker ${CHATGPT_LUNA_CHECKPOINT_MARKER} on its own line, followed by one compact plain-text checkpoint and nothing else. Do not write JSON and do not use a Markdown code fence.`,
-      "User-facing format constraints such as 'reply only with' apply only before the private marker and never permit an empty checkpoint. Immediately follow every marker with Objective: and all required sections; use a concise '- None.' only for a genuinely empty section.",
-      "Use the headings Objective:, State:, Evidence:, Decisions:, and Pending:. Put each heading on its own line and use concise dash bullets under the list headings.",
-      `Keep the checkpoint at or below ${CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS.toLocaleString("en-US")} tokens. Preserve concrete requirements, exact paths, commands, results, decisions, unresolved blockers, and the next useful actions.`,
-      "Record only compact task state and evidence. Do not include hidden reasoning, chain-of-thought, capability tokens, credentials, or transport details.",
-      "The outer bridge removes this marker and checkpoint from the user-facing stream. Never refer to the checkpoint in the visible answer.",
-    ]
-    : [];
   const manualControlContract = manualControl
     ? [
       "<codex_zero_risk_request_json>",
@@ -609,9 +589,7 @@ export function compileChatGptWebPrompt(
       "Each skill_attachment refers to a named UTF-8 text file attached to this message (the final commit in multipart mode). Read its complete contents as the selected Codex skill instructions at the original user priority. These origin=codex_skill messages are supplied by Codex, not human-authored task requests. Preserve their original position in history and their path/resource authority for resolving references. If a file cannot be read, report that limitation; do not invent its contents.",
     ] : [];
     const attachments = skillFiles.length ? { skillFiles } : {};
-    const answerContract = captureLunaCheckpoint
-      ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
-      : "Return only the answer that the outer Codex task should receive.";
+    const answerContract = "Return only the answer that the outer Codex task should receive.";
     if (multipartEnabled) {
       const records: MultipartContextRecord[] = [
         ...system.map((content, system_index) => ({ kind: "system" as const, system_index, content })),
@@ -632,7 +610,6 @@ export function compileChatGptWebPrompt(
           ...transportContract,
           ...outputControlContract,
           ...manualControlContract,
-          ...checkpointContract,
           answerContract,
           ...transportResume,
         ].join("\n"),
@@ -669,7 +646,6 @@ export function compileChatGptWebPrompt(
       ...transportContract,
       ...outputControlContract,
       ...manualControlContract,
-      ...checkpointContract,
       answerContract,
       "<codex_context_json>",
       envelopeJson,

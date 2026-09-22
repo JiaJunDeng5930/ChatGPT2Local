@@ -220,7 +220,7 @@ test("an existing DEV chat changes route only when the user explicitly requests 
   });
 });
 
-test("Bigger Context triples the DEV compaction window and fails closed for Luna", async () => {
+test("Bigger Context triples the DEV browser capacity and fails closed for Luna", async () => {
   const root = scratch("cgw-dev-bigger-context");
   const config = {
     ...defaultConfig("browser-only"),
@@ -241,17 +241,16 @@ test("Bigger Context triples the DEV compaction window and fails closed for Luna
   const store = new DevChatStore(join(root, "chats"));
   const normal = new DevChatDriver(config, store, factory, root);
   const normalState = normal.open("normal-window", "chatgpt-web/high").state;
-  expect(normal.status(normalState).autoCompactTokenLimit).toBe(95_000);
+  expect(normal.status(normalState).inputTokenLimit).toBe(111_193);
 
   const biggerConfig = { ...config, experimentalBiggerContext: true };
   const bigger = new DevChatDriver(biggerConfig, store, factory, root, { biggerContext: true });
   const biggerState = bigger.open("bigger-window", "chatgpt-web/high").state;
   const biggerStatus = bigger.status(biggerState);
   expect(biggerStatus).toMatchObject({
-    autoCompactTokenLimit: 285_000,
-    contextWindow: 333_579,
+    inputTokenLimit: 333_579,
   });
-  expect(biggerStatus.percent).toBe(Math.round((biggerStatus.inputTokens / 285_000) * 1_000) / 10);
+  expect(biggerStatus.remainingTokens).toBe(333_579 - biggerStatus.inputTokens);
   const luna = new DevChatDriver({
     ...biggerConfig,
     solAvailable: false,
@@ -377,7 +376,6 @@ test("DEV driver uses shared browser methods and its own broker while an unrelat
       ...provider.chatgptWeb,
       brokerSocketPath: config.brokerSocketPath,
       threadEnvironmentStatePath: join(stateRoot, "thread-environments.json"),
-      lunaCheckpointStatePath: join(stateRoot, "luna-checkpoints.json"),
     },
   });
   const worker = ChatGptBrowserWorker.forProvider(devProvider(providerConfig(config)));
@@ -435,7 +433,7 @@ test("DEV driver uses shared browser methods and its own broker while an unrelat
   }
 });
 
-test("synthetic fill crosses the production threshold and triggers the real compact handler", async () => {
+test("DEV chat keeps history above the former automatic trigger until the user compacts it", async () => {
   const root = scratch("cgw-dev-compact");
   const config = defaultConfig("full");
   let compactRuns = 0;
@@ -446,7 +444,7 @@ test("synthetic fill crosses the production threshold and triggers the real comp
         compactRuns += 1;
         emit({ type: "text_delta", text: "Synthetic history compacted for the next DEV turn.", phase: "final_answer" });
       } else {
-        emit({ type: "text_delta", text: "DEV turn completed after compaction.", phase: "final_answer" });
+        emit({ type: "text_delta", text: "DEV turn completed with full history.", phase: "final_answer" });
       }
       emit({
         type: "done", stopReason: "stop", endTurn: true,
@@ -456,15 +454,20 @@ test("synthetic fill crosses the production threshold and triggers the real comp
   });
   const store = new DevChatStore(join(root, "chats"));
   const driver = new DevChatDriver(config, store, factory, root);
-  const state = driver.open("auto-compact", "chatgpt-web/light").state;
+  const state = driver.open("no-auto-compact", "chatgpt-web/light").state;
   driver.fill(state, 30_000);
-  expect(driver.status(state).inputTokens).toBeGreaterThanOrEqual(32_000);
+  expect(driver.status(state).inputTokenLimit).toBe(41_000);
   const events: string[] = [];
-  const result = await driver.send(state, "Continue after compacting the synthetic history.", event => events.push(event.type));
-  expect(result).toMatchObject({ text: "DEV turn completed after compaction.", compactions: 1 });
+  const result = await driver.send(state, "Continue with the existing synthetic history.", event => events.push(event.type));
+  expect(result).toMatchObject({ text: "DEV turn completed with full history.", compactions: 0 });
+  expect(compactRuns).toBe(0);
+  expect(events).not.toContain("compaction_start");
+  expect(events).not.toContain("compaction_done");
+  expect(store.load("no-auto-compact")?.compactions).toBe(0);
+  await driver.compact(state, event => events.push(event.type));
   expect(compactRuns).toBe(1);
   expect(events).toContain("compaction_start");
   expect(events).toContain("compaction_done");
-  expect(store.load("auto-compact")?.compactions).toBe(1);
+  expect(store.load("no-auto-compact")?.compactions).toBe(1);
   await driver.close();
 }, 30_000);

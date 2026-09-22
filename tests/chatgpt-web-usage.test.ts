@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { estimateChatGptWebInputTokens, resolveBiggerContextMultipartParts } from "../src/adapters/chatgpt-web/usage";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
-import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "../src/adapters/chatgpt-web/input-tokens";
-import { assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartStagingMode } from "../src/adapters/chatgpt-web/browser-worker";
+import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens, estimateCompiledChatGptWebMessageTokens, compiledChatGptWebMaxMessageChars } from "../src/adapters/chatgpt-web/input-tokens";
+import { assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, resolveChatGptWebMultipartStagingMode } from "../src/adapters/chatgpt-web/browser-worker";
 import { estimateTokens } from "../src/lib/token-estimate";
 import type { CodexParsedRequest } from "../src/types";
 
@@ -23,6 +23,48 @@ test.each([
 ])("%s context uses tokenizer-derived usage without character-pressure inflation", (_label, text) => {
   expect(estimateChatGptWebInputTokens(request(text), capabilities)).toBeLessThan(100_000);
 }, 15_000);
+
+test("Luna keeps the complete history and fails when that request exceeds its browser budget", () => {
+  const luna = {
+    localToolsEnabled: false,
+    solAvailable: false,
+    extraHighAvailable: false,
+    proAvailable: false,
+  };
+  const parsed = request("");
+  parsed.modelId = "gpt-5.6-luna";
+  parsed.options.reasoning = "low";
+  parsed.context.messages = [
+    { role: "user", content: "prior Luna user evidence", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "prior Luna assistant answer" }], timestamp: 2 },
+    { role: "user", content: "current Luna request", timestamp: 3 },
+  ];
+  const compiled = compileChatGptWebPrompt(parsed, luna);
+  expect(compiled.text).toContain("prior Luna user evidence");
+  expect(compiled.text).toContain("prior Luna assistant answer");
+  expect(compiled.text).toContain("current Luna request");
+  expect(compiled.text).not.toContain("CODEXLUNAPRIVATECHECKPOINT");
+
+  const oversized = request("");
+  oversized.modelId = "gpt-5.6-luna";
+  oversized.options.reasoning = "low";
+  oversized.context.messages = [{
+    role: "user",
+    content: `complete history ${"word ".repeat(30_000)}`,
+    timestamp: 1,
+  }];
+  const oversizedCompiled = compileChatGptWebPrompt(oversized, luna);
+  const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(oversizedCompiled, oversized.modelId);
+  expect(estimatedInputTokens).toBeGreaterThan(28_000);
+  expect(() => assertChatGptWebInputWithinLimits(
+    estimatedInputTokens,
+    estimateCompiledChatGptWebMessageTokens(oversizedCompiled, oversized.modelId),
+    oversized.modelId,
+    "low",
+    luna,
+    compiledChatGptWebMaxMessageChars(oversizedCompiled),
+  )).toThrow("measured 28,000-token ChatGPT Free browser transport budget");
+});
 
 test("multipart selection accounts for whole-record and composer fit before submission", () => {
   const plus = { ...capabilities, extraHighAvailable: false, proAvailable: false };
@@ -55,7 +97,7 @@ test("multipart selection accounts for whole-record and composer fit before subm
   ).effort).toBe("max");
 }, 60_000);
 
-test("Bigger Context compaction selects six parts before the legacy inline byte budget", () => {
+test("explicit Bigger Context compaction selects six parts and preserves complete history", () => {
   const parsed = request("x".repeat(160_000));
   parsed._compactionRequest = true;
   const parts = resolveBiggerContextMultipartParts(parsed, capabilities);

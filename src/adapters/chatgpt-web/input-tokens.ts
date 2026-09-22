@@ -10,7 +10,7 @@ import {
 /**
  * The Free/Luna product accepted measured browser inputs at 25,400 and 28,547 estimated tokens,
  * but rejected the same shape at 32,283 before producing a response. This is a ChatGPT browser
- * transport boundary, not Luna's model context window, and applies to normal and checkpoint turns.
+ * transport boundary, not Luna's model context window, and applies to every full-history request.
  */
 export const CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET = 28_000;
 

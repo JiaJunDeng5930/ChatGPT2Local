@@ -50,14 +50,14 @@ Interactive commands:
   /status              Show estimated next-turn context occupancy
   /fill TOKENS         Append deterministic inert context without opening ChatGPT
   /send-fill TOKENS    Send deterministic inert text through the live browser now
-  /compact             Run the real browser compaction path now
+  /compact             Explicitly request browser compaction
   /model MODEL         Select zero-risk, luna, think, light, medium, high, extra-high, or pro
   /reset yes           Clear this named DEV chat and create a new thread identity
   /help                Show this command list
   /exit                Exit
 
 Experimental settings:
-  Bigger Context       Enable in Settings; adapts context across 1, 2, or 3 messages
+  Bigger Context       Enable in Settings; choose 1, 2, or 6 messages by physical fit
 `;
 
 function takeFlag(args: string[], name: string): boolean {
@@ -102,11 +102,8 @@ function modelFromCli(value: string | undefined): DevChatModel | undefined {
 }
 
 function statusLine(status: DevContextStatus): string {
-  const main = `${status.inputTokens.toLocaleString("en-US")} / ${status.autoCompactTokenLimit.toLocaleString("en-US")} tokens (${status.percent}%)`;
-  const transport = status.browserInputTokenLimit
-    ? ` · Luna browser request budget ${status.browserInputTokenLimit.toLocaleString("en-US")}`
-    : "";
-  return `${main} · ${status.inputItems} history items${transport}`;
+  const main = `${status.inputTokens.toLocaleString("en-US")} / ${status.inputTokenLimit.toLocaleString("en-US")} browser input tokens`;
+  return `${main} · ${status.remainingTokens.toLocaleString("en-US")} remaining · ${status.inputItems} history items`;
 }
 
 class EventRenderer {
@@ -157,7 +154,7 @@ function printHeader(
   stdout.write(`model ${state.model} · ${mode === "full" ? "tools explicitly simulated" : "browser-only, no outer tools"} · live launcher browser\n`);
   stdout.write(`context ${statusLine(status)}\n`);
   if (biggerContext) {
-    stdout.write(`${yellow("Bigger Context experimental")} · adaptive 1/2/3-message context · same-agent compaction handoff · elevated rate-limit/cooldown risk\n`);
+    stdout.write(`${yellow("Bigger Context experimental")} · physical-fit 1/2/6-message context · explicit same-agent compaction handoff · elevated rate-limit/cooldown risk\n`);
   }
   stdout.write(`${dim("Codex route is untouched. No Responses port is bound, replaced, stopped, or restarted.")}\n`);
 }
@@ -330,7 +327,7 @@ export async function runDevCommand(args: string[]): Promise<void> {
       stdout.write(`launcher: ${launcher.running ? `running (pid ${launcher.pid})` : `not ready${launcher.error ? ` · ${launcher.error}` : ""}`}\n`);
       stdout.write(`config: ${config.configured ? `${config.mode} (${config.purpose})` : `not ready${config.error ? ` · ${config.error}` : ""}`}\n`);
       stdout.write(`MCP runtime: ${mcpRuntime.required ? (mcpRuntime.ready ? "ready" : `not ready${mcpRuntime.detail ? ` · ${mcpRuntime.detail}` : ""}`) : "not required"}\n`);
-      stdout.write(`Bigger Context: ${features.biggerContext ? "enabled (experimental, adaptive 1/2/3 messages; same-agent compaction handoff)" : "disabled"}\n`);
+      stdout.write(`Bigger Context: ${features.biggerContext ? "enabled (experimental, physical-fit 1/2/6 messages; explicit same-agent compaction handoff)" : "disabled"}\n`);
       stdout.write("Codex route: isolated and unused\nResponses listener: not started\n");
     }
     return;

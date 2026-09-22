@@ -4,7 +4,6 @@ import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
   CHATGPT_WEB_MODEL_PREFIX,
-  resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
 
@@ -105,7 +104,6 @@ export function buildChatGptWebModel(
   if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
     throw new Error("ChatGPT Web model template must be a native Codex model");
   }
-  const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
   const multiAgentVersion = routedSubagentVersion(template, config);
   const priority = routedModelPriority(template, route, config);
   const model: JsonObject = {
@@ -134,18 +132,20 @@ export function buildChatGptWebModel(
     upgrade: null,
     default_reasoning_level: route.codexEffort,
     supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
-    context_window: limits.contextWindow,
-    max_context_window: limits.contextWindow,
-    effective_context_window_percent: limits.effectiveContextWindowPercent,
-    auto_compact_token_limit: limits.autoCompactTokenLimit,
+    // Codex uses these fields to schedule context compaction and truncate Web input. This adapter
+    // owns browser transport limits itself and leaves the native client no Web-specific trigger.
+    context_window: null,
+    max_context_window: null,
+    effective_context_window_percent: null,
+    auto_compact_token_limit: null,
     // ChatGPT Web has no Codex service tier. Never inherit the native template's Fast tiers.
     additional_speed_tiers: [],
     service_tiers: [],
     default_service_tier: null,
   };
   // A native template's compaction hash describes OpenAI's native model contract, not this routed
-  // browser model. The explicit Web window above is owned by this adapter and never copied back to
-  // native models or the user's top-level model_context_window setting.
+  // browser model. Web transport limits are enforced by the adapter, never copied to native rows
+  // or the user's top-level model_context_window setting.
   delete model.comp_hash;
   delete model.availability_nux;
   return model;
