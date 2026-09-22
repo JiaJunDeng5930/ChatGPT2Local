@@ -401,6 +401,7 @@ class BrowserHost {
     this.view = new WebContentsView({
       webPreferences: {
         partition: this.partition,
+        preload: path.join(__dirname, "chatgpt-rate-limit-preload.cjs"),
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -547,6 +548,7 @@ class BrowserHost {
     const view = new WebContentsView({
       webPreferences: {
         partition: this.partition,
+        preload: path.join(__dirname, "chatgpt-rate-limit-preload.cjs"),
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -618,6 +620,7 @@ class BrowserHost {
     const view = new WebContentsView({
       webPreferences: {
         partition: this.partition,
+        preload: path.join(__dirname, "chatgpt-rate-limit-preload.cjs"),
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
