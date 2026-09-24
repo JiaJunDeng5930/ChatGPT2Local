@@ -40,10 +40,14 @@ test("tool-capable browser prompt reads prior Codex context from a temporary fil
     expect(staged.text).toContain("codex_write_stdin({turn_token, session_id");
     expect(staged.text).toContain("codex_apply_patch({turn_token, patch})");
     expect(staged.text).toContain("codex_view_image({turn_token, path, detail?})");
+    expect(staged.text).toContain("Read context information from the temporary file as needed for the task.");
+    expect(staged.text).toContain("If reading it fails or a tool call is blocked, continue with the information and tools available.");
+    expect(staged.text).toContain("finish the user's task before stopping.");
+    expect(staged.text).not.toContain("First call codex_exec");
     const file = readFileSync(path!, "utf8");
-    const [json, marker] = file.trimEnd().split("\n");
-    expect(marker).toMatch(/^CODEX_CONTEXT_END [a-f0-9]{64}$/);
-    const context = JSON.parse(json!) as { system: string[]; messages: Array<{ role: string; content: unknown }> };
+    expect(staged.text).not.toContain("complete file");
+    expect(staged.text).not.toContain("truncation");
+    const context = JSON.parse(file) as { system: string[]; messages: Array<{ role: string; content: unknown }> };
     expect(context.system).toEqual(["system rule"]);
     expect(context.messages.map(message => message.role)).toEqual([
       "developer", "user", "assistant", "current_message_reference",
@@ -71,6 +75,7 @@ test("Zero Risk prompt gives the start and context-read tool calls", () => {
     expect(staged.text).toContain(`codex_turn_start with {"request_id":"${requestId}"}`);
     expect(staged.text).toContain(`codex_exec with {"request_id":"${requestId}"`);
     expect(staged.text).toContain("codex_turn_complete({request_id, final_answer})");
+    expect(staged.text).toContain("To read the temporary context file when needed");
     expect(staged.text).not.toContain("Pass the same turn_token");
   } finally {
     staged.release();

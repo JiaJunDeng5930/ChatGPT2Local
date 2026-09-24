@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,12 +48,10 @@ export function stageChatGptWebContext(
       ...(parsed.options.outputFormat ? { output_format: parsed.options.outputFormat } : {}),
     },
   });
-  const digest = createHash("sha256").update(context).digest("hex");
-  const marker = `CODEX_CONTEXT_END ${digest}`;
   const directory = mkdtempSync(join(tmpdir(), "codex-chatgpt-context-"));
   const path = join(directory, "context.json.txt");
   try {
-    writeFileSync(path, `${context}\n${marker}\n`, { encoding: "utf8", mode: 0o600 });
+    writeFileSync(path, `${context}\n`, { encoding: "utf8", mode: 0o600 });
   } catch (error) {
     rmSync(directory, { recursive: true, force: true });
     throw error;
@@ -81,19 +78,19 @@ export function stageChatGptWebContext(
       : []),
   ];
   const text = [
-    "Act as the model backend for the Codex task. Use the attached Codex Native MCP tools to read the task context before acting.",
+    "Act as the model backend for the Codex task.",
     ...toolInstructions,
     manualControl
-      ? `First call codex_turn_start with ${JSON.stringify({ request_id: turnToken })}. Then call codex_exec with ${JSON.stringify(readArguments)}.`
-      : `First call codex_exec with ${JSON.stringify(readArguments)}. Pass the same turn_token to every later Codex Native call.`,
-    `The final file line must be ${marker}. If a tool reports truncation, read the remaining part before acting. If codex_exec is blocked before reaching Codex, use codex_tool_inventory to find an available native read tool and codex_tool_call to invoke it.`,
-    "The file contains the original system messages, ordered conversation messages, and request options. Replace current_message_reference with the current message below at that position; preserve system, developer, and user priority.",
+      ? `First call codex_turn_start with ${JSON.stringify({ request_id: turnToken })}. To read the temporary context file when needed, call codex_exec with ${JSON.stringify(readArguments)}.`
+      : `To read the temporary context file when needed, call codex_exec with ${JSON.stringify(readArguments)}. Pass the same turn_token to every Codex Native call.`,
+    "Read context information from the temporary file as needed for the task. If reading it fails or a tool call is blocked, continue with the information and tools available. Do not stop because of a failed or blocked tool call; finish the user's task before stopping.",
+    "The file contains the original system messages, ordered conversation messages, and request options. When using it, replace current_message_reference with the current message below at that position; preserve system, developer, and user priority.",
     "<codex_current_message_json>",
     JSON.stringify(currentMessage ?? null),
     "</codex_current_message_json>",
     manualControl
-      ? "After reading the complete file, continue the Codex task and send its complete answer through codex_turn_complete. Do not disclose the request_id in the answer."
-      : "After reading the complete file, continue the Codex task. Return only the task answer and do not disclose the turn_token.",
+      ? "Send the task answer through codex_turn_complete. Do not disclose the request_id in the answer."
+      : "Return only the task answer and do not disclose the turn_token.",
   ].join("\n");
 
   return {
