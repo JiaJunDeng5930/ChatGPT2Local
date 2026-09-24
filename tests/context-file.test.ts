@@ -37,6 +37,9 @@ test("tool-capable browser prompt reads prior Codex context from a temporary fil
     expect(staged.text).toContain(`"turn_token":"${token}"`);
     expect(staged.text).toContain("codex_tool_inventory");
     expect(staged.text).toContain("codex_tool_call");
+    expect(staged.text).toContain("codex_write_stdin({turn_token, session_id");
+    expect(staged.text).toContain("codex_apply_patch({turn_token, patch})");
+    expect(staged.text).toContain("codex_view_image({turn_token, path, detail?})");
     const file = readFileSync(path!, "utf8");
     const [json, marker] = file.trimEnd().split("\n");
     expect(marker).toMatch(/^CODEX_CONTEXT_END [a-f0-9]{64}$/);
@@ -67,6 +70,7 @@ test("Zero Risk prompt gives the start and context-read tool calls", () => {
   try {
     expect(staged.text).toContain(`codex_turn_start with {"request_id":"${requestId}"}`);
     expect(staged.text).toContain(`codex_exec with {"request_id":"${requestId}"`);
+    expect(staged.text).toContain("codex_turn_complete({request_id, final_answer})");
     expect(staged.text).not.toContain("Pass the same turn_token");
   } finally {
     staged.release();
