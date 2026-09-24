@@ -22,6 +22,7 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
+import { stageChatGptWebContext } from "./context-file";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
@@ -416,7 +417,7 @@ export function createChatGptWebAdapter(
       : undefined;
     const compileOptionsFor = (input: CodexParsedRequest) => {
       if (manualRequest) return {};
-      const experimentalMultipartParts = experimentalBiggerContext
+      const experimentalMultipartParts = experimentalBiggerContext && !mode.localTools
         ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments)
         : undefined;
       return {
@@ -481,6 +482,7 @@ export function createChatGptWebAdapter(
       let activeToken: string | undefined;
       let launcherStarted = false;
       let launcherEnded = false;
+      const releaseStagedContexts: Array<() => void> = [];
       const finishLauncher = async (status: LauncherManualTurnEnd["status"]): Promise<void> => {
         if (!launcherStarted || launcherEnded) return;
         await zeroRiskManualControl.end(retainedLauncherDescriptor, {
@@ -494,13 +496,18 @@ export function createChatGptWebAdapter(
         try {
           activeToken = await broker.registerSafe(environment, surfaceNonce, undefined, traceId);
           observeCapabilityRetirement(activeToken, externalProgress);
-          const compiled = compileChatGptWebPrompt(
+          const initialCompiled = compileChatGptWebPrompt(
             parsed,
             turnCapabilities,
             activeToken,
             { manualControl: true },
           );
-          const resumeCompiled = resumeInput
+          const stagedCompiled = parsed._compactionRequest
+            ? undefined
+            : stageChatGptWebContext(initialCompiled, parsed, activeToken, true);
+          const compiled = stagedCompiled ?? initialCompiled;
+          if (stagedCompiled) releaseStagedContexts.push(stagedCompiled.release);
+          const initialResumeCompiled = resumeInput
             ? compileChatGptWebPrompt(
               resumeInput,
               turnCapabilities,
@@ -508,6 +515,10 @@ export function createChatGptWebAdapter(
               { manualControl: true },
             )
             : undefined;
+          const resumeCompiled = initialResumeCompiled && resumeInput
+            ? stageChatGptWebContext(initialResumeCompiled, resumeInput, activeToken, true)
+            : undefined;
+          if (resumeCompiled) releaseStagedContexts.push(resumeCompiled.release);
           for (const candidate of [compiled, resumeCompiled]) {
             if (!candidate) continue;
             if (candidate.multipart) {
@@ -601,6 +612,8 @@ export function createChatGptWebAdapter(
             );
           }
           throw normalized;
+        } finally {
+          for (const release of releaseStagedContexts) release();
         }
       };
       const browserTurn = cancellableBrowserTurn(trackBrowserOwner(runManual()), browserAbort);
@@ -695,7 +708,9 @@ export function createChatGptWebAdapter(
           tokenSettled = true;
           token.resolve(turnToken);
         }
-        return { ...compiled, release: () => {} };
+        return input._compactionRequest
+          ? { ...compiled, release: () => {} }
+          : stageChatGptWebContext(compiled, input, turnToken);
       } catch (error) {
         await broker.revoke(turnToken);
         activeToken = undefined;
