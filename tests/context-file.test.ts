@@ -24,7 +24,7 @@ test("tool-capable browser prompt reads prior Codex context from a temporary fil
   const compiled = compileChatGptWebPrompt(parsed, {
     localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
   }, token);
-  const staged = stageChatGptWebContext(compiled, token);
+  const staged = stageChatGptWebContext(compiled, parsed, token);
   const path = staged.text.match(/cat -- '([^']+)'/)?.[1];
   expect(path).toBeDefined();
   try {
@@ -33,9 +33,10 @@ test("tool-capable browser prompt reads prior Codex context from a temporary fil
     expect(staged.text).not.toContain("earlier request");
     expect(staged.text).not.toContain("<codex_context_json>");
     expect(staged.text).not.toContain("Read the complete inline JSON task context before acting.");
-    expect(staged.text).toContain("For local work required by the task, use the attached Codex Native tools directly");
-    expect(staged.text).toContain("After a deterministic tool failure, update the working hypothesis");
-    expect(staged.text).toContain(`Pass turn_token ${token} unchanged to every Codex Native call`);
+    expect(staged.text).not.toContain("If a ChatGPT-native capability renders a rich card");
+    expect(staged.text).toContain(`"turn_token":"${token}"`);
+    expect(staged.text).toContain("codex_tool_inventory");
+    expect(staged.text).toContain("codex_tool_call");
     const file = readFileSync(path!, "utf8");
     const [json, marker] = file.trimEnd().split("\n");
     expect(marker).toMatch(/^CODEX_CONTEXT_END [a-f0-9]{64}$/);
@@ -49,4 +50,25 @@ test("tool-capable browser prompt reads prior Codex context from a temporary fil
     staged.release();
   }
   expect(existsSync(path!)).toBe(false);
+});
+
+test("Zero Risk prompt gives the start and context-read tool calls", () => {
+  const parsed: CodexParsedRequest = {
+    modelId: CHATGPT_WEB_MODEL_ID,
+    context: { messages: [{ role: "user", content: "current request", timestamp: 1 }] },
+    stream: true,
+    options: { reasoning: "high" },
+  };
+  const requestId = "request_12345678901234567890123456789012";
+  const compiled = compileChatGptWebPrompt(parsed, {
+    localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
+  }, requestId, { manualControl: true });
+  const staged = stageChatGptWebContext(compiled, parsed, requestId, true);
+  try {
+    expect(staged.text).toContain(`codex_turn_start with {"request_id":"${requestId}"}`);
+    expect(staged.text).toContain(`codex_exec with {"request_id":"${requestId}"`);
+    expect(staged.text).not.toContain("Pass the same turn_token");
+  } finally {
+    staged.release();
+  }
 });
