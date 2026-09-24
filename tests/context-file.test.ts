@@ -24,13 +24,18 @@ test("tool-capable browser prompt reads prior Codex context from a temporary fil
   const compiled = compileChatGptWebPrompt(parsed, {
     localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
   }, token);
-  const staged = stageChatGptWebContext(compiled, parsed, token);
+  const staged = stageChatGptWebContext(compiled, token);
   const path = staged.text.match(/cat -- '([^']+)'/)?.[1];
   expect(path).toBeDefined();
   try {
     expect(staged.text).toContain("current request");
     expect(staged.text).not.toContain("large developer instructions");
     expect(staged.text).not.toContain("earlier request");
+    expect(staged.text).not.toContain("<codex_context_json>");
+    expect(staged.text).not.toContain("Read the complete inline JSON task context before acting.");
+    expect(staged.text).toContain("For local work required by the task, use the attached Codex Native tools directly");
+    expect(staged.text).toContain("After a deterministic tool failure, update the working hypothesis");
+    expect(staged.text).toContain(`Pass turn_token ${token} unchanged to every Codex Native call`);
     const file = readFileSync(path!, "utf8");
     const [json, marker] = file.trimEnd().split("\n");
     expect(marker).toMatch(/^CODEX_CONTEXT_END [a-f0-9]{64}$/);

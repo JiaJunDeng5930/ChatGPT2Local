@@ -504,7 +504,7 @@ export function createChatGptWebAdapter(
           );
           const stagedCompiled = parsed._compactionRequest
             ? undefined
-            : stageChatGptWebContext(initialCompiled, parsed, activeToken, true);
+            : stageChatGptWebContext(initialCompiled, activeToken, true);
           const compiled = stagedCompiled ?? initialCompiled;
           if (stagedCompiled) releaseStagedContexts.push(stagedCompiled.release);
           const initialResumeCompiled = resumeInput
@@ -516,7 +516,7 @@ export function createChatGptWebAdapter(
             )
             : undefined;
           const resumeCompiled = initialResumeCompiled && resumeInput
-            ? stageChatGptWebContext(initialResumeCompiled, resumeInput, activeToken, true)
+            ? stageChatGptWebContext(initialResumeCompiled, activeToken, true)
             : undefined;
           if (resumeCompiled) releaseStagedContexts.push(resumeCompiled.release);
           for (const candidate of [compiled, resumeCompiled]) {
@@ -710,7 +710,7 @@ export function createChatGptWebAdapter(
         }
         return input._compactionRequest
           ? { ...compiled, release: () => {} }
-          : stageChatGptWebContext(compiled, input, turnToken);
+          : stageChatGptWebContext(compiled, turnToken);
       } catch (error) {
         await broker.revoke(turnToken);
         activeToken = undefined;
