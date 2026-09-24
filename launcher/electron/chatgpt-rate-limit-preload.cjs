@@ -25,11 +25,7 @@ function installChatGptRateLimitHandler(protocol) {
   if (document.getElementById(protocol.stateId)) return;
   const state = document.createElement("meta");
   state.id = protocol.stateId;
-  state.setAttribute("data-revision", "0");
-  state.setAttribute("data-consumed", "0");
-  state.setAttribute("data-unhandled", "false");
   state.setAttribute("data-pending", "false");
-  state.setAttribute("data-close-failed", "false");
   document.documentElement.appendChild(state);
 
   const titlePattern = new RegExp(protocol.titlePattern, "i");
@@ -62,9 +58,6 @@ function installChatGptRateLimitHandler(protocol) {
         if (!visible(dialog) || !isRateLimitDialog(dialog)) continue;
         if (!active.has(dialog)) {
           active.set(dialog, { firstSeen: Date.now(), clicked: false });
-          // Record before click: the handler may synchronously remove the entire dialog.
-          set("data-revision", Number(state.getAttribute("data-revision")) + 1);
-          set("data-unhandled", true);
         }
         const occurrence = active.get(dialog);
         if (occurrence.clicked) continue;
@@ -76,13 +69,12 @@ function installChatGptRateLimitHandler(protocol) {
         if (!button) continue;
         occurrence.clicked = true;
         // No keyboard events or focus restoration: they could target the concurrent composer.
-        try { button.click(); } catch { /* The persistent pending state reports failure. */ }
+        try { button.click(); } catch { /* Keep tracking the dialog as a UI blocker. */ }
       }
       for (const [dialog] of active) {
         if (!visible(dialog)) active.delete(dialog);
       }
       set("data-pending", active.size > 0);
-      set("data-close-failed", [...active.values()].some(item => Date.now() - item.firstSeen >= protocol.closeTimeoutMs));
       // Poll only during the bounded close window, including CSS-only closing animations.
       // Later DOM mutations still handle delayed buttons and dialog reuse without a busy loop.
       if ([...active.values()].some(item => Date.now() - item.firstSeen < protocol.closeTimeoutMs)) {

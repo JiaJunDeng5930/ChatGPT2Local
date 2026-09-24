@@ -1,32 +1,24 @@
-# Coordinate ChatGPT rate-limit dismissal and submission evidence
+# Dismiss ChatGPT rate-limit dialogs as UI blockers
 
 Status: Accepted
 
-Rate-limit dialogs can appear while browser automation is preparing a message, submitting it,
-or observing a response. Dismissal must not wait for the current Playwright operation, but removing
-the dialog must not erase evidence of a rejected request. Keyboard acknowledgement also races with
-the composer's focus and can activate the wrong control.
+The “Too many requests” dialog is a UI obstruction. Its presence or successful dismissal does
+not establish whether the current request was accepted or rejected, so dismissing it must not
+create a local rate-limit error or replace another failure. The normal submission evidence
+decides the outcome: observed acceptance continues through response reading, while an actual
+request rejection remains the responsibility of the submission rejection observer.
 
 Use one self-contained installer for the Electron preload and Playwright page initialization.
-Keep the installation marker, notice revision, consumed revision, and closing state in the DOM:
-Electron's isolated preload and the page do not share JavaScript globals. Record each known
-frequency notice before clicking its acknowledgement button. Click once per visible occurrence,
-track removal or reuse, and bound waiting for the close operation. Do not dismiss arbitrary dialogs
-or restore focus from the observer.
+The isolated Electron preload and the page share only the DOM, so retain the installation marker,
+scan event, and pending state there. The observer recognizes only the configured dialog titles,
+clicks an acknowledgement button at most once per visible occurrence, tracks removal or reuse,
+and schedules scans for at most two seconds to cover close animations and delayed buttons. DOM
+mutations continue to trigger scans after that interval. Do not dismiss arbitrary dialogs or
+restore focus from the observer.
 
-An explicitly new request retires notices that were already closed before preparation. Notices
-discovered during installation and still-visible dialogs remain actionable. Reconnecting the same
-page preserves this evidence. Preparation interrupted by a new notice fails with a non-retryable
-rate-limit error; closing a notification does not prove that a server cooldown has ended.
-
-Inspect and click the send button in one JavaScript task, checking pending notices and control
-availability first. Retry only a local control check that explicitly reports it did not click.
-Keep the host's send-activation notification before activation, and retain the existing ambiguous
-submission failure behavior for exceptions or transport loss. Do not replay attachments or send
-again to recover from a dialog.
-
-After activation, prefer observed submission acceptance over a concurrent notice, including a fresh
-observation after waiting for dismissal. Once submission is accepted, dismiss subsequent notices
-while continuing to read the response. Actual request rejection remains the responsibility of the
-existing submission rejection observer. This separates UI obstruction from server acceptance
-without treating either an absent dialog or a successful click as proof of delivery.
+Inspect and click the send button in one JavaScript task. If the shared pending state is true,
+return the existing unavailable result, which proves that this evaluation did not click; retry
+only this bounded local control check. Once a click occurs, never activate Send again to recover
+from the dialog. Keep the host's send-activation notification before activation and preserve the
+existing ambiguous submission behavior for exceptions or transport loss. Do not replay
+attachments or change actual upstream rejection handling.
