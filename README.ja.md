@@ -65,15 +65,12 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 
 <a id="modes"></a>
 
-自動モードでは、推論セレクターがないアカウントに Luna/Think を表示します。それ以外は Instant～High に加え、Extra High と Pro をそれぞれ利用可能な場合に表示します。
+モデルカタログでは、推論セレクターがないアカウントには Luna/Think を、それ以外のアカウントには Instant～High を表示します。Extra High と Pro は、利用可能な場合に表示されます。
 
 | モード | メッセージの送信 | ローカル Codex ツール |
 | --- | --- | --- |
 | **Browser-only** | 自動 | なし |
-| **Full harness (With Automation)** | 自動 | MCP 経由で利用可能 |
-| **Zero Risk** | 手動で貼り付けて送信 | 専用 MCP コネクタ経由で利用可能 |
-
-Zero Risk は ChatGPT ページを読み取ったり操作したりしません。モデルと `Codex Zero Risk` コネクタを自分で選び、用意されたプロンプトを貼り付けて送信し、ランチャーで **Sent** を確認してください。自動モードの各モデル項目は固定の ChatGPT モードに対応し、Codex の Effort や Speed では上書きされません。
+| **Full harness** | 自動 | MCP 経由で利用可能 |
 
 <a id="full-harness"></a>
 

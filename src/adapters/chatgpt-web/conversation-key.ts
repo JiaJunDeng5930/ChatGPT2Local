@@ -15,7 +15,7 @@ function messageText(item: Record<string, unknown>): string | undefined {
 }
 
 /** Native compaction remains part of the exact identity of a replayed Codex turn. */
-function compactionEpoch(input: unknown[] | undefined): unknown {
+export function chatGptCompactionEpoch(input: unknown[] | undefined): unknown {
   return input?.findLast(item => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return false;
     const record = item as Record<string, unknown>;
@@ -38,7 +38,7 @@ export function chatGptConversationKey(
     threadId: identity.threadId,
     modelId: parsed.modelId,
     reasoning: parsed.options.reasoning,
-    compaction: compactionEpoch(raw?.input),
+    compaction: chatGptCompactionEpoch(raw?.input),
   })).digest("hex");
 }
 

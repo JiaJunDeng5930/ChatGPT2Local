@@ -8,21 +8,26 @@ import { chatGptBrowserTabClosedError } from "../src/adapters/chatgpt-web/adapte
 import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 
-test.each([[true, false, true], [false, false, true], [true, true, true], [true, false, false]])("browser turns preserve recovery, ordering and final-only tools (owned=%s, tools=%s, multipart=%s)", async (owned, tools, multipart) => {
+test.each([[true, false, true], [false, false, true], [true, true, true], [true, false, false]])("browser turns preserve multipart ordering and select tools only for the final turn (owned=%s, tools=%s, multipart=%s)", async (owned, tools, multipart) => {
   const diagnostics = mkdtempSync(join(tmpdir(), "compaction-observation-"));
   const cancellationCase = owned && !tools && !multipart;
   const effort = tools ? "xhigh" : "high";
-  const finalResponse = cancellationCase ? chatGptBrowserTabClosedError() : new Error("fixture reached final response observation");
+  const finalResponse = chatGptBrowserTabClosedError();
   const capabilities = { localToolsEnabled: tools, solAvailable: true, extraHighAvailable: true, proAvailable: true };
   const progress = tools ? new ChatGptExternalTurnProgress() : undefined;
-  const recoveryCallbacks: unknown[] = [];
   const actions: string[] = [];
   const sendBudgets: number[] = [];
   let stage = "";
   let released = false;
   let activated = 0;
+  let closed = false;
   const frame = {};
-  const page = Object.assign(new EventEmitter(), { evaluate: async () => ({}), isClosed: () => false, mainFrame: () => frame });
+  const page = Object.assign(new EventEmitter(), {
+    addInitScript: async () => {},
+    evaluate: async () => ({}),
+    isClosed: () => closed,
+    mainFrame: () => frame,
+  });
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { appName: "Codex Native2", browserDiagnosticsPath: diagnostics, ...(owned ? { browserHostDescriptorPath: "owned-descriptor" } : {}) },
     runStage: async (_trace: string, name: string, timeout: number, action: (signal: AbortSignal) => Promise<unknown>) => {
@@ -37,11 +42,7 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
     },
     captureSubmissionBaseline: async () => ({}),
     attachPrompt: async (_page: unknown, _text: string, localTools: boolean) => {
-      expect(localTools).toBe(false);
-      actions.push("attach:plain");
-    },
-    attachPromptWithCompactionRetry: async (_page: unknown, _text: string, localTools: boolean) => {
-      expect(localTools).toBe(tools);
+      expect(localTools).toBe(stage === "prompt_attachment" && tools);
       actions.push(localTools ? "attach:tools" : "attach:plain");
     },
     attachFiles: async () => { actions.push("files"); },
@@ -60,15 +61,17 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
           json: async () => ({ detail: { code: "message_length_exceeds_limit" } }),
         });
       }
-      recoveryCallbacks.push(args[7]);
       actions.push("send");
       return "user_turn";
     },
     waitForNewAssistantTurn: async (...args: unknown[]) => {
       expect(args[4]).toBe(stage === "send" ? progress : undefined);
-      recoveryCallbacks.push(args[7]);
       actions.push("observe");
-      if (stage === "send") throw finalResponse;
+      if (stage === "send") {
+        closed = true;
+        page.emit("close");
+        throw finalResponse;
+      }
       return {};
     },
     waitForMultipartAcknowledgement: async () => { actions.push("ack"); },
@@ -88,9 +91,6 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       } : undefined,
       prepare: async () => ({ text: "Summarize the context", images: [], multipart: multipart ? { parts: Array.from({ length: 6 }, (_, index) => JSON.stringify({ part: index + 1 })), commit: "Summarize" } : undefined, release: () => { released = true; } }),
     }, owned ? "owned-surface" : undefined, page)).rejects.toBe(finalResponse);
-    expect(recoveryCallbacks.map(callback => typeof callback)).toEqual(
-      Array(multipart ? 12 : 2).fill(owned ? "function" : "undefined"),
-    );
     expect(actions).toEqual([
       ...(multipart ? [
         "effort:low",

@@ -7,11 +7,7 @@ import { browserLoginStateExists, loginVerificationMarkerPath } from "./browser-
 import { getServiceStatus } from "./service";
 import { tunnelStatus } from "./tunnel";
 import { getTunnelServiceStatus } from "./tunnel-service";
-import {
-  inspectLauncherBrowserHost,
-  inspectLauncherBrowserHostLiveness,
-  readLauncherBrowserHostDescriptor,
-} from "./launcher-browser-host";
+import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
 import { processRunning } from "./process";
 
 export type CheckStatus = "ok" | "warning" | "error";
@@ -110,18 +106,12 @@ export async function runDoctor(): Promise<DoctorReport> {
 
   if (config.browserHost === "launcher") {
     try {
-      const descriptor = config.browserInteractionMode === "manual"
-        ? await inspectLauncherBrowserHostLiveness(config.browserHostDescriptorPath!, { timeoutMs: 5_000 })
-        : readLauncherBrowserHostDescriptor(config.browserHostDescriptorPath!);
-      if (config.browserInteractionMode === "automatic") {
-        await inspectLauncherBrowserHost(config.browserHostDescriptorPath!, { timeoutMs: 30_000 });
-      }
+      const descriptor = readLauncherBrowserHostDescriptor(config.browserHostDescriptorPath!);
+      await inspectLauncherBrowserHost(config.browserHostDescriptorPath!, { timeoutMs: 30_000 });
       checks.push({
         id: "browser-host",
         status: "ok",
-        message: config.browserInteractionMode === "manual"
-          ? `Embedded launcher browser is reachable for Zero Risk (pid ${descriptor.pid})`
-          : `Embedded launcher browser is authenticated and reachable (pid ${descriptor.pid})`,
+        message: `Embedded launcher browser is authenticated and reachable (pid ${descriptor.pid})`,
       });
     } catch (error) {
       checks.push({
@@ -177,44 +167,48 @@ export async function runDoctor(): Promise<DoctorReport> {
   checks.push(await proxyCheck(config));
 
   if (config.mode === "full") {
-    const settings = config.tunnel!;
-    if (!existsSync(settings.binaryPath)) {
-      checks.push({ id: "tunnel-binary", status: "error", message: `tunnel-client is missing: ${settings.binaryPath}` });
+    const settings = config.tunnel;
+    if (!settings) {
+      checks.push({ id: "tunnel-config", status: "error", message: "Full mode has no configured MCP tunnel; rerun setup" });
     } else {
-      checks.push({ id: "tunnel-binary", status: "ok", message: "Pinned openai/tunnel-client binary is installed" });
+      if (!existsSync(settings.binaryPath)) {
+        checks.push({ id: "tunnel-binary", status: "error", message: `tunnel-client is missing: ${settings.binaryPath}` });
+      } else {
+        checks.push({ id: "tunnel-binary", status: "ok", message: "Pinned openai/tunnel-client binary is installed" });
+      }
+      if (!existsSync(settings.runtimeKeyFile)) {
+        checks.push({ id: "tunnel-key", status: "error", message: "Tunnel runtime key file is missing" });
+      } else if (!secureFile(settings.runtimeKeyFile)) {
+        checks.push({ id: "tunnel-key", status: "error", message: "Tunnel runtime key file has unsafe permissions" });
+      } else {
+        checks.push({ id: "tunnel-key", status: "ok", message: "Tunnel runtime key is stored privately" });
+      }
+      const tunnelService = getTunnelServiceStatus();
+      if (config.browserHost === "launcher") {
+        checks.push(tunnelService.installed || tunnelService.loaded
+          ? {
+              id: "tunnel-service",
+              status: "warning",
+              message: "A legacy OS tunnel service still exists; rerun launcher MCP setup to migrate ownership",
+              detail: JSON.stringify(tunnelService),
+            }
+          : { id: "tunnel-service", status: "ok", message: "Launcher owns the tunnel runtime" });
+      } else {
+        checks.push(tunnelService.installed && tunnelService.loaded && tunnelService.running
+          ? { id: "tunnel-service", status: "ok", message: "macOS tunnel service is installed, loaded, and running" }
+          : { id: "tunnel-service", status: "error", message: "macOS tunnel service is not fully running", detail: JSON.stringify(tunnelService) });
+      }
+      const runtime = tunnelStatus(config);
+      checks.push(runtime.ok
+        ? { id: "tunnel-runtime", status: "ok", message: "Tunnel runtime reports healthy and ready" }
+        : { id: "tunnel-runtime", status: "error", message: "Tunnel runtime is not ready", detail: runtime.detail });
+      checks.push({
+        id: "connector",
+        status: "warning",
+        message: `Local checks cannot prove that ChatGPT connector ${JSON.stringify(config.appName)} is attached to this tunnel`,
+        detail: "Verify it once at https://chatgpt.com/#settings/Plugins while the tunnel is ready.",
+      });
     }
-    if (!existsSync(settings.runtimeKeyFile)) {
-      checks.push({ id: "tunnel-key", status: "error", message: "Tunnel runtime key file is missing" });
-    } else if (!secureFile(settings.runtimeKeyFile)) {
-      checks.push({ id: "tunnel-key", status: "error", message: "Tunnel runtime key file has unsafe permissions" });
-    } else {
-      checks.push({ id: "tunnel-key", status: "ok", message: "Tunnel runtime key is stored privately" });
-    }
-    const tunnelService = getTunnelServiceStatus();
-    if (config.browserHost === "launcher") {
-      checks.push(tunnelService.installed || tunnelService.loaded
-        ? {
-            id: "tunnel-service",
-            status: "warning",
-            message: "A legacy OS tunnel service still exists; rerun launcher MCP setup to migrate ownership",
-            detail: JSON.stringify(tunnelService),
-          }
-        : { id: "tunnel-service", status: "ok", message: "Launcher owns the tunnel runtime" });
-    } else {
-      checks.push(tunnelService.installed && tunnelService.loaded && tunnelService.running
-        ? { id: "tunnel-service", status: "ok", message: "macOS tunnel service is installed, loaded, and running" }
-        : { id: "tunnel-service", status: "error", message: "macOS tunnel service is not fully running", detail: JSON.stringify(tunnelService) });
-    }
-    const runtime = tunnelStatus(config);
-    checks.push(runtime.ok
-      ? { id: "tunnel-runtime", status: "ok", message: "Tunnel runtime reports healthy and ready" }
-      : { id: "tunnel-runtime", status: "error", message: "Tunnel runtime is not ready", detail: runtime.detail });
-    checks.push({
-      id: "connector",
-      status: "warning",
-      message: `Local checks cannot prove that ChatGPT connector ${JSON.stringify(config.appName)} is attached to this tunnel`,
-      detail: "Verify it once at https://chatgpt.com/#settings/Plugins while the tunnel is ready.",
-    });
   } else {
     checks.push({ id: "tools", status: "warning", message: "Browser-only mode intentionally has no local tools or MCP tunnel" });
   }

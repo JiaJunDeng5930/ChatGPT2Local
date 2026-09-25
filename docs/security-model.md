@@ -104,16 +104,15 @@ all Chromium storage. The separate passkey flow uses a dedicated temporary Chrom
 
 ### Cross-turn data leakage
 
-Browser turns use at most five independent task-bound tabs in one private login partition. Every
-outer Codex task owns an exact launcher surface lease and retains its Temporary Chat only across
-sequential messages in the same model/effort/compaction epoch; chats are never reused across tasks.
-Closing a running tab destroys its page and terminates that turn. The five-tab limit bounds parallel
-account traffic. Tool calls remain in the same ChatGPT response. The
-bounded local continuation cache is private, expires, and exists only to implement Codex
-`previous_response_id` replay. Full-mode context compaction accepts a checkpoint only through its
-one-shot MCP control capability in the exact retained source chat. If that chat no longer exists, a
-fresh tool-free Temporary Chat receives the canonical Codex history; the bridge never parses ordinary
-assistant prose as a structured handoff.
+Browser turns use independent task-bound tabs in one private login partition, with no fixed total-tab
+or concurrent-turn cap. Tabs are not evicted for capacity. Each outer Codex task owns an exact launcher
+surface lease, and chats are never reused across tasks. Completed pages remain visible until the user
+explicitly closes them; closing a running tab destroys its page and terminates that turn. Tool calls
+remain in the same ChatGPT response. The bounded local continuation cache is private, expires, and
+exists only to implement Codex `previous_response_id` replay. Full-mode context compaction uses one
+independent runtime for each distinct canonical input. Identical inputs reuse the same execution, and
+compaction leaves the source page and runtime untouched; the bridge never parses ordinary assistant
+prose as a structured handoff.
 
 ## Network exposure
 

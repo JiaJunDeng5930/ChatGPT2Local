@@ -4,7 +4,6 @@ import { stdin, stdout } from "node:process";
 import { DEV_CHATGPT_CONNECTOR_NAME, loadConfig } from "../config";
 import {
   inspectLauncherBrowserHost,
-  inspectLauncherBrowserHostLiveness,
   readLauncherBrowserHostDescriptor,
 } from "../launcher-browser-host";
 import { setupDevProfile } from "../setup";
@@ -36,8 +35,8 @@ const DEV_HELP = `Codex Web GPT DEV chat
 Usage:
   codex-chatgpt-web dev launcher
   codex-chatgpt-web dev status [--json]
-  codex-chatgpt-web dev setup --browser-only [--automatic-browser-interaction]
-  codex-chatgpt-web dev setup --full --tunnel-id ID --runtime-key-file PATH [--automatic-browser-interaction|--zero-risk-browser-interaction]
+  codex-chatgpt-web dev setup --browser-only
+  codex-chatgpt-web dev setup --full --tunnel-id ID --runtime-key-file PATH
   codex-chatgpt-web dev chat NAME [--model MODEL] [MESSAGE]
   codex-chatgpt-web dev list
 
@@ -51,7 +50,7 @@ Interactive commands:
   /fill TOKENS         Append deterministic inert context without opening ChatGPT
   /send-fill TOKENS    Send deterministic inert text through the live browser now
   /compact             Explicitly request browser compaction
-  /model MODEL         Select zero-risk, luna, think, light, medium, high, extra-high, or pro
+  /model MODEL         Select luna, think, light, medium, high, extra-high, or pro
   /reset yes           Clear this named DEV chat and create a new thread identity
   /help                Show this command list
   /exit                Exit
@@ -96,7 +95,7 @@ function modelFromCli(value: string | undefined): DevChatModel | undefined {
   const normalized = value.trim().toLowerCase();
   const slug = normalized.startsWith("chatgpt-web/") ? normalized : `chatgpt-web/${normalized}`;
   if (!(DEV_CHAT_MODELS as readonly string[]).includes(slug)) {
-    throw new Error(`Unknown DEV model ${JSON.stringify(value)}; choose zero-risk, luna, think, light, medium, high, extra-high, or pro`);
+    throw new Error(`Unknown DEV model ${JSON.stringify(value)}; choose luna, think, light, medium, high, extra-high, or pro`);
   }
   return slug as DevChatModel;
 }
@@ -166,15 +165,9 @@ async function assertLauncherReady(config: ReturnType<typeof loadConfig>): Promi
   if (config.browserHost !== "launcher" || !config.browserHostDescriptorPath) {
     throw new Error("DEV chat requires the isolated desktop launcher; run bun run dev:launcher first");
   }
-  if (config.browserInteractionMode === "manual") {
-    await inspectLauncherBrowserHostLiveness(config.browserHostDescriptorPath, {
-      expectedProfile: DEV_LAUNCHER_PROFILE,
-    });
-  } else {
-    await inspectLauncherBrowserHost(config.browserHostDescriptorPath, {
-      expectedProfile: DEV_LAUNCHER_PROFILE,
-    });
-  }
+  await inspectLauncherBrowserHost(config.browserHostDescriptorPath, {
+    expectedProfile: DEV_LAUNCHER_PROFILE,
+  });
 }
 
 async function executeMessage(driver: DevChatDriver, state: DevChatState, message: string): Promise<void> {
@@ -342,11 +335,6 @@ export async function runDevCommand(args: string[]): Promise<void> {
     const descriptorPath = takeOption(args, "--browser-host-descriptor") ?? paths.descriptorPath;
     const acknowledgedUnofficial = takeFlag(args, "--acknowledge-unofficial");
     const refreshAccountCapabilities = takeFlag(args, "--refresh-account-capabilities");
-    const automaticBrowserInteraction = takeFlag(args, "--automatic-browser-interaction");
-    const manualBrowserInteraction = takeFlag(args, "--zero-risk-browser-interaction");
-    if (automaticBrowserInteraction && manualBrowserInteraction) {
-      throw new Error("Choose at most one browser interaction mode");
-    }
     const skillAttachments = takeFlag(args, "--skill-attachments");
     const inlineSkills = takeFlag(args, "--inline-skills");
     if (skillAttachments && inlineSkills) throw new Error("Choose --skill-attachments or --inline-skills");
@@ -361,9 +349,6 @@ export async function runDevCommand(args: string[]): Promise<void> {
       browserHostDescriptorPath: descriptorPath,
       refreshAccountCapabilities,
       acknowledgedUnofficial,
-      ...(automaticBrowserInteraction || manualBrowserInteraction
-        ? { browserInteractionMode: manualBrowserInteraction ? "manual" : "automatic" }
-        : {}),
       ...(biggerContext || standardContext ? { experimentalBiggerContext: biggerContext } : {}),
       ...(skillAttachments || inlineSkills ? { experimentalSkillAttachments: skillAttachments } : {}),
       ...(tunnelId ? { tunnelId } : {}),

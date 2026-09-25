@@ -9,7 +9,6 @@ import { captureSystemBrowserLoginToFile, checkBrowserEngine, loginToChatGpt } f
 import { defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
 import {
   inspectLauncherBrowserHost,
-  inspectLauncherBrowserHostLiveness,
   readLauncherBrowserHostDescriptor,
 } from "./launcher-browser-host";
 import {
@@ -58,12 +57,6 @@ Usage:
 Setup options:
   --browser-only               Account-eligible Web models, full context/images, no local tools or tunnel
   --full                       Account-eligible Web models with tools through the configured connector
-  --automatic-browser-interaction
-                               Send prompts and read ChatGPT state through browser automation (default)
-  --zero-risk-browser-interaction
-                               Full mode: select, paste, and send in the launcher yourself
-  --zero-risk-pro              Zero Risk: also install the explicit Pro-sized model row
-  --zero-risk-default          Zero Risk: install only the default model row
   --port NUMBER                Loopback Responses port (default: 17841)
   --chrome PATH                Google Chrome/Chromium executable used for account login
   --browser-host-descriptor PATH
@@ -271,16 +264,6 @@ async function setupCommand(args: string[]): Promise<void> {
     mode: full ? "full" : "browser-only",
     ...(portRaw ? { port: Number(portRaw) } : {}),
   };
-  const automaticBrowserInteraction = takeFlag(args, "--automatic-browser-interaction");
-  const manualBrowserInteraction = takeFlag(args, "--zero-risk-browser-interaction");
-  if (automaticBrowserInteraction && manualBrowserInteraction) {
-    throw new Error(
-      "Choose at most one browser interaction mode: --automatic-browser-interaction or --zero-risk-browser-interaction",
-    );
-  }
-  if (automaticBrowserInteraction || manualBrowserInteraction) {
-    options.browserInteractionMode = manualBrowserInteraction ? "manual" : "automatic";
-  }
   const subagentProtocol = takeOption(args, "--subagent-protocol");
   if (subagentProtocol !== undefined) {
     if (subagentProtocol !== "compatibility-v1" && subagentProtocol !== "native") {
@@ -309,12 +292,6 @@ async function setupCommand(args: string[]): Promise<void> {
   }
   if (biggerContext || standardContext) options.experimentalBiggerContext = biggerContext;
   if (skillAttachments || inlineSkills) options.experimentalSkillAttachments = skillAttachments;
-  const zeroRiskPro = takeFlag(args, "--zero-risk-pro");
-  const zeroRiskDefault = takeFlag(args, "--zero-risk-default");
-  if (zeroRiskPro && zeroRiskDefault) {
-    throw new Error("Choose at most one Zero Risk model profile: --zero-risk-pro or --zero-risk-default");
-  }
-  if (zeroRiskPro || zeroRiskDefault) options.zeroRiskProEnabled = zeroRiskPro;
   options.replaceCodexRoute = takeFlag(args, "--replace-codex-route");
   options.restartService = takeFlag(args, "--restart-service");
   assertNoArgs(args);
@@ -336,12 +313,11 @@ async function setupCommand(args: string[]): Promise<void> {
   }
 
   const existing = existsSync(getConfigPath()) ? loadConfigForSetup() : undefined;
-  const interactionMode = options.browserInteractionMode ?? existing?.browserInteractionMode ?? "automatic";
-  const reusableCredentials = existingFullSetupCredentials(existing, interactionMode);
+  const reusableCredentials = existingFullSetupCredentials(existing);
   const needsTunnelId = !options.tunnelId && !reusableCredentials.tunnelId;
   const needsRuntimeKey = !options.runtimeKeyFile
     && !reusableCredentials.runtimeKey
-    && !existsSync(managedRuntimeKeyPath(interactionMode));
+    && !existsSync(managedRuntimeKeyPath());
 
   if (full && (needsTunnelId || needsRuntimeKey) && stdin.isTTY) {
     stdout.write("Full mode needs an OpenAI tunnel and a runtime key with Tunnels Read + Use.\n");
@@ -570,13 +546,8 @@ async function main(): Promise<void> {
     if (action !== "check") throw new Error("Browser command must be: browser check");
     const config = loadConfig();
     if (config.browserHost === "launcher") {
-      if (config.browserInteractionMode === "manual") {
-        await inspectLauncherBrowserHostLiveness(config.browserHostDescriptorPath!);
-        stdout.write("The launcher browser is reachable; ChatGPT DOM inspection is intentionally disabled in Zero Risk.\n");
-      } else {
-        await inspectLauncherBrowserHost(config.browserHostDescriptorPath!);
-        stdout.write("Playwright can reach the authenticated ChatGPT surface embedded in the launcher.\n");
-      }
+      await inspectLauncherBrowserHost(config.browserHostDescriptorPath!);
+      stdout.write("Playwright can reach the authenticated ChatGPT surface embedded in the launcher.\n");
     } else {
       await checkBrowserEngine(config);
       stdout.write("Playwright can launch the configured Chrome executable.\n");

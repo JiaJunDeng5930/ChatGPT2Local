@@ -6,7 +6,7 @@ const path = require("node:path");
 const { CURRENT_CONNECTOR_NAME, DEV_CONNECTOR_NAME } = require("../electron/connector-identity.cjs");
 const { RuntimeHost } = require("../electron/runtime.cjs");
 
-function hostFor(existingConfig, interactionMode = "automatic") {
+function hostFor(existingConfig) {
   const host = new RuntimeHost({
     app: {
       getPath: () => path.join(os.tmpdir(), "codex-web-gpt-runtime-host-test"),
@@ -21,7 +21,6 @@ function hostFor(existingConfig, interactionMode = "automatic") {
       stopForSetup: async () => ({ status: "stopped" }),
       startIfConfigured: async () => ({ status: "ready" }),
     },
-    getBrowserInteractionMode: () => interactionMode,
   });
   let invocation;
   host.runSetup = async (name, args, options = {}) => {
@@ -32,7 +31,7 @@ function hostFor(existingConfig, interactionMode = "automatic") {
   return { host, invocation: () => invocation };
 }
 
-function devHostFor(existingConfig, interactionMode = "automatic") {
+function devHostFor(existingConfig) {
   const host = new RuntimeHost({
     app: {
       getPath: () => path.join(os.tmpdir(), "codex-web-gpt-dev-runtime-host-test"),
@@ -49,7 +48,6 @@ function devHostFor(existingConfig, interactionMode = "automatic") {
       stopForSetup: async () => ({ status: "stopped" }),
       startIfConfigured: async () => ({ status: "ready" }),
     },
-    getBrowserInteractionMode: () => interactionMode,
   });
   let invocation;
   host.runDevSetup = async (name, args, options = {}) => {
@@ -69,7 +67,6 @@ test("core setup preserves an existing full-harness installation", async () => {
     "--full",
     "--browser-host-descriptor",
     "/runtime/launcher-browser.json",
-    "--automatic-browser-interaction",
     "--refresh-account-capabilities",
     "--replace-codex-route",
     "--acknowledge-unofficial",
@@ -94,63 +91,6 @@ test("core setup starts in browser-only mode when no installation exists", async
   assert.equal(fixture.invocation().args.includes("--chrome"), false);
 });
 
-test("core setup refuses an implicit Automatic fallback for a new Zero Risk installation", async () => {
-  const fixture = hostFor(null, "manual");
-  await assert.rejects(
-    fixture.host.setupCore(),
-    /Zero Risk must be installed through MCP setup because tunnel credentials are required/,
-  );
-  assert.equal(fixture.invocation(), undefined);
-});
-
-test("Zero Risk can be enabled only from an installed Full harness", async () => {
-  await assert.rejects(
-    hostFor(null).host.setBrowserInteractionMode("manual"),
-    /Install the Codex integration/,
-  );
-  await assert.rejects(
-    hostFor({ mode: "browser-only", browserHost: "launcher" }).host.setBrowserInteractionMode("manual"),
-    /Connect the Full MCP harness/,
-  );
-});
-
-test("browser interaction mode changes reuse the transactional setup and refresh only automatic capabilities", async () => {
-  const config = {
-    mode: "full",
-    browserHost: "launcher",
-    appName: "Codex Native2",
-    experimentalBiggerContext: true,
-  };
-  const manual = hostFor(config);
-  const manualResult = await manual.host.setBrowserInteractionMode("manual");
-  assert.equal(manualResult.mode, "manual");
-  assert.equal(manual.invocation().args.includes("--zero-risk-browser-interaction"), true);
-  assert.equal(manual.invocation().args.includes("--refresh-account-capabilities"), false);
-  assert.equal(manual.invocation().args.includes("--standard-context"), true);
-
-  const automatic = hostFor(config);
-  const automaticResult = await automatic.host.setBrowserInteractionMode("automatic");
-  assert.equal(automaticResult.mode, "automatic");
-  assert.equal(automatic.invocation().args.includes("--automatic-browser-interaction"), true);
-  assert.equal(automatic.invocation().args.includes("--refresh-account-capabilities"), true);
-  assert.equal(automatic.invocation().args.includes("--bigger-context"), true);
-});
-
-test("switching back from Zero Risk preserves the saved automatic connector identity", async () => {
-  const fixture = hostFor({
-    mode: "full",
-    browserHost: "launcher",
-    appName: "Codex Zero Risk",
-    automaticAppName: "Codex Native2",
-    browserInteractionMode: "manual",
-  }, "manual");
-  await fixture.host.setBrowserInteractionMode("automatic");
-  const args = fixture.invocation().args;
-  assert.equal(args.includes("--app-name"), false);
-  assert.equal(fixture.host.setupConnectorName(), CURRENT_CONNECTOR_NAME);
-  assert.equal(args.includes("Codex Zero Risk"), false);
-});
-
 test("DEV core setup configures only the isolated harness contract", async () => {
   const fixture = devHostFor(null);
   const result = await fixture.host.setupDevCore();
@@ -163,7 +103,6 @@ test("DEV core setup configures only the isolated harness contract", async () =>
       "--browser-only",
       "--browser-host-descriptor",
       "/dev/runtime/launcher-browser.json",
-      "--automatic-browser-interaction",
       "--refresh-account-capabilities",
       "--acknowledge-unofficial",
     ],
@@ -183,7 +122,6 @@ test("Bigger Context uses the setup transaction and refreshes the production Cod
       "--full",
       "--browser-host-descriptor",
       "/runtime/launcher-browser.json",
-      "--automatic-browser-interaction",
       "--replace-codex-route",
       "--acknowledge-unofficial",
       "--restart-service",
@@ -204,47 +142,10 @@ test("Bigger Context updates the isolated DEV config without installing a Codex 
       "--browser-only",
       "--browser-host-descriptor",
       "/dev/runtime/launcher-browser.json",
-      "--automatic-browser-interaction",
       "--acknowledge-unofficial",
       "--standard-context",
     ],
   });
-});
-
-test("Zero Risk Pro transaction installs or removes only its explicit model profile", async () => {
-  const config = {
-    mode: "full",
-    browserHost: "launcher",
-    browserInteractionMode: "manual",
-    appName: "Codex Zero Risk",
-    automaticAppName: "Codex Native2",
-  };
-  const enabled = hostFor(config, "manual");
-  const result = await enabled.host.setZeroRiskPro(true);
-  assert.equal(result.enabled, true);
-  assert.deepEqual(enabled.invocation(), {
-    name: "zero-risk-pro",
-    args: [
-      "setup",
-      "--full",
-      "--browser-host-descriptor",
-      "/runtime/launcher-browser.json",
-      "--zero-risk-browser-interaction",
-      "--acknowledge-unofficial",
-      "--standard-context",
-      "--zero-risk-pro",
-      "--replace-codex-route",
-      "--restart-service",
-    ],
-  });
-
-  const disabled = hostFor(config, "manual");
-  await disabled.host.setZeroRiskPro(false);
-  assert.equal(disabled.invocation().args.includes("--zero-risk-default"), true);
-  await assert.rejects(
-    hostFor({ ...config, browserInteractionMode: "automatic" }).host.setZeroRiskPro(true),
-    /only while the Full Zero Risk harness is active/,
-  );
 });
 
 test("DEV setup child environment removes launcher-rebound production aliases", async () => {
@@ -297,7 +198,6 @@ test("DEV MCP setup reuses only DEV-home credentials and targets its distinct co
         "--full",
         "--browser-host-descriptor",
         "/dev/runtime/launcher-browser.json",
-        "--automatic-browser-interaction",
         "--acknowledge-unofficial",
       ],
     });
@@ -381,7 +281,6 @@ test("launcher update transaction upgrades its owned full runtime with saved con
     "--full",
     "--browser-host-descriptor",
     "/runtime/launcher-browser.json",
-    "--automatic-browser-interaction",
     "--refresh-account-capabilities",
     "--acknowledge-unofficial",
     "--restart-service",
@@ -412,7 +311,6 @@ test("launcher migrates the legacy connector identity even when the release vers
     "--full",
     "--browser-host-descriptor",
     "/runtime/launcher-browser.json",
-    "--automatic-browser-interaction",
     "--refresh-account-capabilities",
     "--acknowledge-unofficial",
     "--restart-service",
@@ -435,21 +333,6 @@ test("launcher update transaction does not preserve a stale disconnected route p
   assert.equal("bridgeEnabled" in result, false);
   assert.equal(fixture.invocation().args.includes("disconnect"), false);
   assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), true);
-});
-
-test("launcher update preserves Zero Risk and never probes its account capabilities", async () => {
-  const fixture = hostFor({
-    mode: "full",
-    browserHost: "launcher",
-    browserInteractionMode: "manual",
-    appName: "Codex Zero Risk",
-    releaseVersion: "1.1.1",
-  });
-
-  assert.equal((await fixture.host.upgradeManagedRuntime()).updated, true);
-  assert.equal(fixture.invocation().args.includes("--zero-risk-browser-interaction"), true);
-  assert.equal(fixture.invocation().args.includes("--automatic-browser-interaction"), false);
-  assert.equal(fixture.invocation().args.includes("--refresh-account-capabilities"), false);
 });
 
 test("launcher update transaction leaves current and externally owned runtimes unchanged", async () => {
@@ -490,7 +373,6 @@ test("MCP setup reuses valid private credentials without exposing or rewriting t
       "--full",
       "--browser-host-descriptor",
       "/runtime/launcher-browser.json",
-      "--automatic-browser-interaction",
       "--replace-codex-route",
       "--acknowledge-unofficial",
       "--restart-service",
@@ -510,12 +392,11 @@ test("new MCP setup uses the fixed connector without a CLI name override", async
     runtimeKey: "new-private-runtime-key",
   });
 
-  assert.deepEqual(fixture.invocation().args.slice(0, 5), [
+  assert.deepEqual(fixture.invocation().args.slice(0, 4), [
     "setup",
     "--full",
     "--browser-host-descriptor",
     "/runtime/launcher-browser.json",
-    "--automatic-browser-interaction",
   ]);
   assert.equal(fixture.invocation().args.includes("--app-name"), false);
   assert.equal(fixture.host.setupConnectorName(), CURRENT_CONNECTOR_NAME);
@@ -906,50 +787,6 @@ test("setup preflight keeps the requested setup budget before stopping the curre
   assert.deepEqual(events, ["preflight", "stop", "setup", "start"]);
 });
 
-test("a browser-mode commit failure restores the previous runtime inside setup", async () => {
-  const previousConfig = {
-    mode: "full",
-    browserHost: "launcher",
-    browserInteractionMode: "manual",
-    releaseVersion: "1.1.3",
-  };
-  let stops = 0;
-  let starts = 0;
-  let checkpointRestores = 0;
-  let runtimeRestores = 0;
-  const host = new RuntimeHost({
-    app: {
-      getPath: () => path.join(os.tmpdir(), "codex-web-gpt-browser-commit-rollback"),
-      getVersion: () => "1.1.3",
-    },
-    logger: { info() {}, warn() {}, error() {} },
-    sourceRoot: "/source",
-    browserDescriptorPath: "/runtime/launcher-browser.json",
-    supervisor: {
-      readSetupConfig: () => previousConfig,
-      readConfig: () => previousConfig,
-      stopForSetup: async () => { stops += 1; },
-      startIfConfigured: async () => { starts += 1; return { status: "ready" }; },
-    },
-  });
-  host.captureSetupCheckpoint = () => ({ exact: "checkpoint" });
-  host.setupCheckpointChanged = () => true;
-  host.restoreSetupCheckpoint = () => { checkpointRestores += 1; };
-  host.restorePreviousRuntime = async () => { runtimeRestores += 1; };
-  host.run = async () => ({ code: 0, stdout: "", stderr: "" });
-
-  await assert.rejects(
-    host.runSetup("browser-interaction-mode", ["setup", "--full"], {
-      afterRuntimeReady: async () => { throw new Error("surface ownership failed"); },
-    }),
-    /surface ownership failed/,
-  );
-  assert.equal(stops, 1);
-  assert.equal(starts, 1);
-  assert.equal(checkpointRestores, 1);
-  assert.equal(runtimeRestores, 1);
-});
-
 test("launcher delegates an existing terminal-managed installation to the migration-aware CLI", async () => {
   let config = { mode: "full", browserHost: "managed-chrome", releaseVersion: "0.1.16" };
   let prepared = 0;
@@ -1279,16 +1116,13 @@ test("passkey sign-in is rejected outside macOS even if IPC is invoked directly"
   assert.throws(() => fixture.passkeyChromeExecutable(), /supported only on macOS/);
 });
 
-test("skill file experiment uses the setup transaction in production and DEV, and rejects manual mode", async () => {
-  const production = hostFor({ mode: "full", browserInteractionMode: "automatic" });
+test("skill file experiment updates production and DEV configurations", async () => {
+  const production = hostFor({ mode: "full" });
   assert.equal((await production.host.setSkillAttachments(true)).enabled, true);
   assert.equal(production.invocation().args.includes("--skill-attachments"), true);
   assert.equal(production.invocation().args.includes("--restart-service"), true);
-  const dev = devHostFor({ mode: "full", browserInteractionMode: "automatic" });
+  const dev = devHostFor({ mode: "full" });
   assert.equal((await dev.host.setSkillAttachments(false)).enabled, false);
   assert.equal(dev.invocation().args.includes("--inline-skills"), true);
   assert.equal(dev.invocation().args.includes("--replace-codex-route"), false);
-  const manual = hostFor({ mode: "full", browserInteractionMode: "manual" }, "manual");
-  await assert.rejects(() => manual.host.setSkillAttachments(true), /Zero Risk/);
-  assert.equal(manual.invocation(), undefined);
 });

@@ -129,7 +129,7 @@ test("launcher UI localizes MCP verification progress and doctor check messages"
 test("native dialogs and IPC accept exactly the renderer's supported languages", () => {
   const main = read("launcher", "electron", "main.cjs");
   const copySource = main.slice(main.indexOf("const NATIVE_COPY ="), main.indexOf("function updateTrayMenu("));
-  const validation = main.slice(main.indexOf("function validateLanguage("), main.indexOf("function validateBrowserInteractionMode("));
+  const validation = main.slice(main.indexOf("function validateLanguage("), main.indexOf("function validateBounds("));
   const { nativeCopyFor, validateLanguage } = Function("languages", `${copySource}\n${validation}\nreturn {nativeCopyFor, validateLanguage};`)(languages);
   const english = nativeCopyFor("en");
   for (const language of Object.keys(languages)) {
@@ -154,7 +154,6 @@ test("all locales translate known doctor success checks without changing literal
     ["tunnel-runtime", "Tunnel runtime reports healthy and ready", "doctorTunnelRuntimeReady"],
     ["config", `Configuration is valid (${fixturePath})`, "doctorConfigValid", "{path}", fixturePath],
     ["browser-host", "Embedded launcher browser is authenticated and reachable (pid 345)", "doctorBrowserReady", "{pid}", "345"],
-    ["browser-host", "Embedded launcher browser is reachable for Zero Risk (pid 678)", "doctorManualBrowserReady", "{pid}", "678"],
     ["codex", "Codex native model route is installed", "doctorCodexInstalled"],
     ["service", "Launcher owns the background runtime", "doctorRuntimeOwned"],
     ["chrome", `Chrome executable found: ${fixturePath}`, "doctorChromeFound", "{path}", fixturePath],

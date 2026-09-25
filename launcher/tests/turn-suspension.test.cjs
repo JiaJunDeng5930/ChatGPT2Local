@@ -5,7 +5,6 @@ const {
   shouldBlockSleepForTurns,
   sweepGapIndicatesSuspension,
 } = require("../electron/turn-suspension.cjs");
-const { BrowserHost } = require("../electron/browser-host.cjs");
 
 // Suspension freezes both launcher sweeps and helper heartbeats. These tests pin wake-side lease
 // re-baselining and sleep prevention without treating suspended time as helper failure.
@@ -42,50 +41,4 @@ test("sleep is blocked exactly while a turn is running", () => {
   assert.equal(shouldBlockSleepForTurns([]), false);
   assert.equal(shouldBlockSleepForTurns([{ status: "ready" }, { status: "error" }]), false);
   assert.equal(shouldBlockSleepForTurns([{ status: "ready" }, { status: "running" }]), true);
-});
-
-test("the first sweep after a suspension refreshes stale leases instead of reaping them", () => {
-  const reaped = [];
-  const warnings = [];
-  const tab = {
-    id: "t1", traceId: "trace-1", helperPid: 42, status: "running",
-    bootstrapReady: true, lastHeartbeatAt: 1_000,
-  };
-  const host = {
-    lastTurnSweepAt: 1_000,
-    turnTabs: new Map([["t1", tab]]),
-    logger: { warn: (event, detail) => warnings.push({ event, detail }), info: () => {} },
-    removeTurnTab: t => reaped.push(t.traceId),
-    refreshTurnLeases: BrowserHost.prototype.refreshTurnLeases,
-  };
-
-  // Fifteen minutes pass without a sweep — the launcher was asleep, and so was the helper.
-  BrowserHost.prototype.reapExpiredTurnTabs.call(host, 1_000 + 15 * 60_000);
-
-  assert.deepEqual(reaped, []);
-  assert.equal(tab.lastHeartbeatAt, 1_000 + 15 * 60_000);
-  assert.equal(warnings[0].event, "browser.turn_leases_refreshed_after_suspension");
-
-  // The next sweep runs on cadence; the lease is fresh, so the turn lives on.
-  BrowserHost.prototype.reapExpiredTurnTabs.call(host, 1_000 + 15 * 60_000 + 5_000);
-  assert.deepEqual(reaped, []);
-});
-
-test("a helper that is genuinely gone is still reaped on the ordinary cadence", () => {
-  const reaped = [];
-  const tab = {
-    id: "t1", traceId: "trace-1", helperPid: 42, status: "running",
-    bootstrapReady: true, lastHeartbeatAt: 1_000,
-  };
-  const host = {
-    lastTurnSweepAt: 56_000,
-    turnTabs: new Map([["t1", tab]]),
-    logger: { warn: () => {}, info: () => {} },
-    removeTurnTab: t => reaped.push(t.traceId),
-    refreshTurnLeases: BrowserHost.prototype.refreshTurnLeases,
-  };
-
-  BrowserHost.prototype.reapExpiredTurnTabs.call(host, 61_000);
-
-  assert.deepEqual(reaped, ["trace-1"]);
 });

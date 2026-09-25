@@ -2,8 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
-import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
+import { readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
+import { ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
 
@@ -167,6 +167,7 @@ export class LauncherBrowserHelperClient {
   private ready?: Promise<void>;
   private readyResolve?: () => void;
   private readyReject?: (error: Error) => void;
+  private helperError?: Error;
   private readonly pending = new Map<string, PendingTurn>();
   private helperFeatures = new Set<string>();
 
@@ -193,8 +194,9 @@ export class LauncherBrowserHelperClient {
 
   async run(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    await this.ensureChild();
+    await this.waitForReady(turn.abortSignal);
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (this.helperError) throw this.helperError;
     if (turn.onMultipartStageAcknowledged && !this.helperFeatures.has("multipart-stage-ack")) {
       throw new Error(
         "Launcher browser helper does not support multipart acknowledgement forwarding; update or restart the launcher",
@@ -226,16 +228,17 @@ export class LauncherBrowserHelperClient {
               );
               return;
             }
-            void this.send({
-              type: "abort",
-              id: turn.traceId,
-              ...(turn.abortSignal?.reason instanceof ChatGptCompactionHandoffAccepted
-                ? { reason: "compaction_handoff_accepted" }
-                : {}),
-            }).catch(error => {
+            const abortError = new DOMException("ChatGPT web turn aborted", "AbortError");
+            if (this.helperHasExited()) {
+              this.finishWithError(turn.traceId, abortError);
+              return;
+            }
+            void this.send({ type: "abort", id: turn.traceId }).catch(error => {
               this.finishWithError(
                 turn.traceId,
-                error instanceof Error ? error : new Error(String(error)),
+                this.helperHasExited()
+                  ? abortError
+                  : error instanceof Error ? error : new Error(String(error)),
               );
             });
           };
@@ -280,46 +283,62 @@ export class LauncherBrowserHelperClient {
           .then(() => {
             if (!progressForwarding.signal.aborted) this.forwardProgress(turn, progressForwarding.signal);
           })
-          .catch(error => this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error))));
+          .catch(error => {
+            // Once the helper has exited, sent turns remain owned by the broker until an explicit
+            // turn abort or client close. A failed write cannot safely manufacture completion.
+            if (this.helperHasExited()) return;
+            this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error)));
+          });
       });
   }
 
   async close(): Promise<void> {
     const child = this.child;
+    const closingError = new DOMException("Launcher browser helper is closing", "AbortError");
+    this.readyReject?.(closingError);
     this.child = undefined;
     this.ready = undefined;
     this.readyResolve = undefined;
     this.readyReject = undefined;
+    this.helperError = undefined;
+    this.helperFeatures.clear();
     for (const id of [...this.pending.keys()]) {
-      this.finishWithError(id, new DOMException("Launcher browser helper is closing", "AbortError"));
+      this.finishWithError(id, closingError);
     }
     if (!child) return;
     await this.sendTo(child, { type: "shutdown" }).catch(() => {});
     await this.terminateChild(child, 2_000);
   }
 
-  private async ensureChild(): Promise<void> {
-    if (this.child
-      && !this.child.killed
-      && this.child.exitCode === null
-      && this.child.signalCode === null
-      && this.ready) {
-      return this.ready;
+  private ensureChild(): Promise<void> {
+    if (this.helperError) return Promise.reject(this.helperError);
+    if (this.child) {
+      if (this.child.exitCode !== null || this.child.signalCode !== null) {
+        this.handleExit(this.child, this.processExitError(this.child));
+        return Promise.reject(this.helperError!);
+      }
+      return this.ready ?? Promise.reject(new Error("Launcher browser helper readiness is unavailable"));
     }
     const descriptor = readLauncherBrowserHostDescriptor(this.config.browserHostDescriptorPath!);
-    const child = spawn(
-      descriptor.helper.executable,
-      [this.config.browserHelperScriptPath ?? this.bundledHelperScript() ?? descriptor.helper.script],
-      {
-        env: {
-          ...process.env,
-          ELECTRON_RUN_AS_NODE: "1",
-          CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS: "1",
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(
+        descriptor.helper.executable,
+        [this.config.browserHelperScriptPath ?? this.bundledHelperScript() ?? descriptor.helper.script],
+        {
+          env: {
+            ...process.env,
+            ELECTRON_RUN_AS_NODE: "1",
+            CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS: "1",
+          },
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
         },
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-      },
-    );
+      );
+    } catch (error) {
+      this.helperError = error instanceof Error ? error : new Error(String(error));
+      return Promise.reject(this.helperError);
+    }
     this.child = child;
     this.ready = new Promise<void>((resolveReady, rejectReady) => {
       this.readyResolve = resolveReady;
@@ -329,47 +348,40 @@ export class LauncherBrowserHelperClient {
     output.on("line", line => this.handleLine(child, line));
     const errors = createInterface({ input: child.stderr });
     errors.on("line", line => console.info(`[chatgpt-web-helper] ${line}`));
-    const failChild = (error: Error) => {
-      const owned = this.child === child;
-      this.handleExit(child, error);
-      if (owned && Number.isInteger(child.pid) && child.exitCode === null && child.signalCode === null) {
-        void this.terminateChild(child, 0).catch(cleanupError => {
-          console.error(
-            `[chatgpt-web-helper] process-error cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-          );
-        });
-      }
-    };
-    child.once("error", failChild);
-    child.stdin.once("error", error => failChild(new Error(
-      `Launcher browser helper input failed: ${error instanceof Error ? error.message : String(error)}`,
-    )));
+    child.once("error", error => this.handleProcessError(child, error));
+    child.stdin.once("error", error => this.handleProcessError(
+      child,
+      new Error(`Launcher browser helper input failed: ${error instanceof Error ? error.message : String(error)}`),
+    ));
     child.once("exit", (code, signal) => this.handleExit(child, new Error(
       `Launcher browser helper exited ${signal ? `from signal ${signal}` : `with status ${code ?? 1}`}`,
     )));
-    const timer = setTimeout(() => {
-      if (this.child === child) this.readyReject?.(new Error("Launcher browser helper did not become ready"));
-    }, 15_000);
-    try {
-      await this.ready;
-    } catch (error) {
-      if (this.child === child) {
-        this.child = undefined;
-        this.ready = undefined;
-        this.readyResolve = undefined;
-        this.readyReject = undefined;
-      }
-      try {
-        await this.terminateChild(child, 500);
-      } catch (cleanupError) {
-        const primary = error instanceof Error ? error.message : String(error);
-        const cleanup = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-        throw new Error(`${primary}; launcher browser helper cleanup failed: ${cleanup}`);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
+    return this.ready!;
+  }
+
+  private async waitForReady(signal?: AbortSignal): Promise<void> {
+    const readiness = this.ensureChild();
+    if (!signal) return readiness;
+    if (signal.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    await new Promise<void>((resolveReady, rejectReady) => {
+      const cleanup = () => signal.removeEventListener("abort", onAbort);
+      const onAbort = () => {
+        cleanup();
+        rejectReady(new DOMException("ChatGPT web turn aborted", "AbortError"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      readiness.then(
+        () => {
+          cleanup();
+          resolveReady();
+        },
+        error => {
+          cleanup();
+          rejectReady(error);
+        },
+      );
+      if (signal.aborted) onAbort();
+    });
   }
 
   private handleLine(child: ChildProcessWithoutNullStreams, line: string): void {
@@ -378,10 +390,7 @@ export class LauncherBrowserHelperClient {
     try { message = parseHelperMessage(line); }
     catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      this.handleExit(child, new Error(`Launcher browser helper emitted invalid protocol data: ${detail}`));
-      void this.terminateChild(child, 0).catch(error => {
-        console.error(`[chatgpt-web-helper] invalid-protocol cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
+      console.error(`[chatgpt-web-helper] ignored invalid protocol frame (${line.length} characters): ${detail}; frame=${line}`);
       return;
     }
     if (message.type === "ready") {
@@ -557,6 +566,7 @@ export class LauncherBrowserHelperClient {
     pending.localFailure = error;
     void this.send({ type: "abort", id }).catch(sendError => {
       if (this.pending.get(id) !== pending) return;
+      if (this.helperHasExited()) return;
       this.finishWithError(
         id,
         new AggregateError(
@@ -623,33 +633,36 @@ export class LauncherBrowserHelperClient {
     pending.reject(error);
   }
 
+  private handleProcessError(child: ChildProcessWithoutNullStreams, error: Error): void {
+    if (this.child !== child) return;
+    if (Number.isInteger(child.pid) && child.exitCode === null && child.signalCode === null) {
+      console.error(`[chatgpt-web-helper] process error while helper ${child.pid} remains alive: ${error.message}`);
+      return;
+    }
+    this.handleExit(child, new Error(`Launcher browser helper failed to start: ${error.message}`));
+  }
+
+  private processExitError(child: ChildProcessWithoutNullStreams): Error {
+    return new Error(
+      `Launcher browser helper exited ${child.signalCode ? `from signal ${child.signalCode}` : `with status ${child.exitCode ?? 1}`}`,
+    );
+  }
+
+  private helperHasExited(): boolean {
+    const child = this.child;
+    return !!this.helperError
+      || !child
+      || child.exitCode !== null
+      || child.signalCode !== null;
+  }
+
   private handleExit(child: ChildProcessWithoutNullStreams, error: Error): void {
     if (this.child !== child) return;
+    if (this.helperError) return;
+    this.helperError = error;
     this.readyReject?.(error);
     this.readyReject = undefined;
     this.readyResolve = undefined;
-    this.ready = undefined;
-    this.child = undefined;
-    for (const id of [...this.pending.keys()]) {
-      const pending = this.pending.get(id);
-      if (!pending) continue;
-      void notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
-        phase: "end",
-        traceId: id,
-        helperPid: child.pid!,
-        status: "failed",
-        message: "Launcher browser helper exited before completing the turn",
-      }).then(
-        () => this.finishWithError(id, pending.localFailure ?? error),
-        controlError => this.finishWithError(
-          id,
-          new AggregateError(
-            [pending.localFailure ?? error, controlError instanceof Error ? controlError : new Error(String(controlError))],
-            `Launcher browser helper exited and failed to release turn ${id}`,
-          ),
-        ),
-      );
-    }
   }
 
   private async waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
@@ -672,7 +685,7 @@ export class LauncherBrowserHelperClient {
   }
 
   private async terminateChild(child: ChildProcessWithoutNullStreams, gracefulTimeoutMs: number): Promise<void> {
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
     child.stdin.end();
     if (await this.waitForExit(child, gracefulTimeoutMs)) return;
     if (!child.kill("SIGTERM") && child.exitCode === null && child.signalCode === null) {

@@ -18,7 +18,6 @@ export function stageChatGptWebContext(
   compiled: CompiledChatGptWebPrompt,
   parsed: CodexParsedRequest,
   turnToken: string,
-  manualControl = false,
 ): CompiledChatGptWebPrompt & { release: () => void } {
   if (compiled.multipart) throw new Error("File-backed Codex context does not use multipart browser transport");
   const opening = "<codex_context_json>\n";
@@ -57,40 +56,29 @@ export function stageChatGptWebContext(
     throw error;
   }
 
-  const turnReference = manualControl ? { request_id: turnToken } : { turn_token: turnToken };
   const readArguments = {
-    ...turnReference,
+    turn_token: turnToken,
     cmd: `cat -- ${shellQuote(path)}`,
     max_output_tokens: 100000,
   };
-  const referenceKey = manualControl ? "request_id" : "turn_token";
   const toolInstructions = [
     "Codex Native tool calls (use the exact declared MCP tool names and JSON arguments):",
-    manualControl
-      ? "codex_turn_start({request_id}) connects this Zero Risk request; call it before any other Codex Native tool."
-      : "Every Codex Native call in this response must include the same turn_token, including calls after tool results.",
-    `codex_exec({${referenceKey}, cmd, workdir?, yield_time_ms?, max_output_tokens?, tty?, sandbox_permissions?, justification?, prefix_rule?}) runs a native command. If it returns session_id, continue with codex_write_stdin({${referenceKey}, session_id, chars?, yield_time_ms?, max_output_tokens?}).`,
-    `codex_apply_patch({${referenceKey}, patch}) applies a native patch. codex_view_image({${referenceKey}, path, detail?}) views a local image; detail is high or original.`,
-    `codex_tool_inventory({${referenceKey}, query?, offset?, limit?, include_schema?}) lists available outer Codex tools, their exact wire_name and, when include_schema is true, their arguments. Follow next_offset to inspect further pages when needed.`,
-    `codex_tool_call({${referenceKey}, wire_name, arguments? or input?}) invokes a tool returned by codex_tool_inventory. Use arguments for a function tool and input for a freeform tool; never supply both. Follow that tool's declared schema. The outer Codex runtime performs execution and approvals.`,
-    ...(manualControl
-      ? ["When all work is finished, call codex_turn_complete({request_id, final_answer}) with the complete answer to Codex."]
-      : []),
+    "Every Codex Native call in this response must include the same turn_token, including calls after tool results.",
+    "codex_exec({turn_token, cmd, workdir?, yield_time_ms?, max_output_tokens?, tty?, sandbox_permissions?, justification?, prefix_rule?}) runs a native command. If it returns session_id, continue with codex_write_stdin({turn_token, session_id, chars?, yield_time_ms?, max_output_tokens?}).",
+    "codex_apply_patch({turn_token, patch}) applies a native patch. codex_view_image({turn_token, path, detail?}) views a local image; detail is high or original.",
+    "codex_tool_inventory({turn_token, query?, offset?, limit?, include_schema?}) lists available outer Codex tools, their exact wire_name and, when include_schema is true, their arguments. Follow next_offset to inspect further pages when needed.",
+    "codex_tool_call({turn_token, wire_name, arguments? or input?}) invokes a tool returned by codex_tool_inventory. Use arguments for a function tool and input for a freeform tool; never supply both. Follow that tool's declared schema. The outer Codex runtime performs execution and approvals.",
   ];
   const text = [
     "Act as the model backend for the Codex task.",
     ...toolInstructions,
-    manualControl
-      ? `First call codex_turn_start with ${JSON.stringify({ request_id: turnToken })}. To read the temporary context file when needed, call codex_exec with ${JSON.stringify(readArguments)}.`
-      : `To read the temporary context file when needed, call codex_exec with ${JSON.stringify(readArguments)}. Pass the same turn_token to every Codex Native call.`,
+    `To read the temporary context file when needed, call codex_exec with ${JSON.stringify(readArguments)}. Pass the same turn_token to every Codex Native call.`,
     "Read context information from the temporary file as needed for the task. If reading it fails or a tool call is blocked, continue with the information and tools available. Do not stop because of a failed or blocked tool call; finish the user's task before stopping.",
     "The file contains the original system messages, ordered conversation messages, and request options. When using it, replace current_message_reference with the current message below at that position; preserve system, developer, and user priority.",
     "<codex_current_message_json>",
     JSON.stringify(currentMessage ?? null),
     "</codex_current_message_json>",
-    manualControl
-      ? "Send the task answer through codex_turn_complete. Do not disclose the request_id in the answer."
-      : "Return only the task answer and do not disclose the turn_token.",
+    "Return only the task answer and do not disclose the turn_token.",
   ].join("\n");
 
   return {

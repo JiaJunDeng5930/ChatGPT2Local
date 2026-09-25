@@ -2,7 +2,6 @@ import type { AdapterEvent, CodexMessagePhase, CodexProviderContinuationState, C
 import { adapterFailureFromMessage, classifyError, type CodexErrorPayload } from "./lib/errors";
 import { encodeCompactionSummary } from "./responses/compaction";
 import { encodeReasoningEnvelope, type ReasoningEnvelope } from "./responses/reasoning-envelope";
-import { resolveStallTimeoutSec } from "./stall-timeout";
 import { usageDisplayTotalTokens } from "./usage/totals";
 
 function uuid(): string {
@@ -91,6 +90,7 @@ export function bridgeToResponsesSSE(
   heartbeatMs = 2_000,
   options?: {
     responseId?: string;
+    /** Accepted for config compatibility; upstream silence no longer terminates a response. */
     stallTimeoutSec?: number;
     hideThinkingSummary?: boolean;
     /**
@@ -105,8 +105,6 @@ export function bridgeToResponsesSSE(
     onCompletedResponse?: (response: Record<string, unknown>, providerState?: CodexProviderContinuationState) => void;
     /** Test seam for the platform-specific Bun stream transport. */
     streamPlatform?: NodeJS.Platform;
-    /** Test seam for the monotonic upstream-silence clock. */
-    now?: () => number;
   },
 ): ReadableStream<Uint8Array> {
   // Freeform/custom tools (apply_patch) carry their body in `input`; the model is given a
@@ -161,10 +159,7 @@ export function bridgeToResponsesSSE(
     terminalReported = true;
     options?.onTerminal?.(status);
   };
-  // RC3 keep-alive: Codex's idle timer is timeout(idle_timeout, stream.next()) over an
-  // eventsource_stream; ANY received event re-arms it, while an unknown type is ignored
-  // (responses.rs `_ => Ok(None)`). We emit a real, parser-ignored `response.heartbeat` only during
-  // upstream silence so a stalled routed provider never trips "idle timeout waiting for SSE".
+  // Keep the Responses stream active while the adapter is waiting for its next real event.
   let beat: ReturnType<typeof setInterval> | undefined;
   let controller: ReadableStreamDefaultController<Uint8Array>;
   let emittedFrames = 0;
@@ -200,14 +195,6 @@ export function bridgeToResponsesSSE(
       });
 
       const heartbeatFrame = encoder.encode('event: response.heartbeat\ndata: {"type":"response.heartbeat"}\n\n');
-      let stallWarned = false;
-      const now = options?.now ?? (() => performance.now());
-      let lastAdapterEventAt = now();
-      let lastAdapterEventType = "<none>";
-      let adapterEventCount = 0;
-      const streamStartedAt = lastAdapterEventAt;
-      const stallSec = resolveStallTimeoutSec(options?.stallTimeoutSec);
-      const stallTimeoutMs = stallSec * 1000;
 
       let currentMsg: { itemId: string; outputIndex: number; text: string; phase?: CodexMessagePhase } | null = null;
       let currentReasoning: { itemId: string; outputIndex: number; text: string } | null = null;
@@ -420,10 +407,6 @@ export function bridgeToResponsesSSE(
           if (next.done) { upstreamDone = true; break; }
           const event = next.value;
           let terminalEvent = false;
-          lastAdapterEventAt = now();
-          lastAdapterEventType = event.type;
-          adapterEventCount += 1;
-          stallWarned = false;
           reportFirstOutput(event);
           // Compaction turns emit ONLY the synthetic compaction item + response.completed. The
           // summary text is accumulated silently: emitting it as a normal assistant message would
@@ -738,49 +721,6 @@ export function bridgeToResponsesSSE(
         gated = true;
         beat = setInterval(() => {
           if (closed || gated) return;
-          const checkedAt = now();
-          const silenceMs = checkedAt - lastAdapterEventAt;
-          if (silenceMs >= stallTimeoutMs / 2 && !stallWarned) {
-            // Halfway to cancelling the turn. A healthy adapter heartbeats far more often than
-            // this, so reaching here at all means a keep-alive gap that should be found before it
-            // costs a user their turn.
-            stallWarned = true;
-            console.warn(
-              `[bridge] upstream silence halfway to the stall budget model=${modelId}`
-              + ` response=${responseId} stallSec=${stallSec} adapterEvents=${adapterEventCount}`
-              + ` lastEvent=${lastAdapterEventType} sinceLastEventMs=${silenceMs}`,
-            );
-          }
-          if (silenceMs >= stallTimeoutMs) {
-            console.error(
-              `[bridge] upstream_stall_timeout model=${modelId} response=${responseId}`
-              + ` stallSec=${stallSec} adapterEvents=${adapterEventCount}`
-              + ` lastEvent=${lastAdapterEventType} sinceLastEventMs=${silenceMs}`
-              + ` sinceStreamStartMs=${checkedAt - streamStartedAt}`
-              + ` iteratorStarted=${iteratorStarted} upstreamDone=${upstreamDone} emittedFrames=${emittedFrames}`,
-            );
-            if (currentMsg) closeCurrentMessage();
-            if (currentReasoning) closeCurrentReasoning();
-            if (currentRawReasoning) closeCurrentRawReasoning();
-            flushHiddenRawReasoning();
-            if (currentToolCall) closeCurrentToolCall();
-            emit("response.incomplete", {
-              response: {
-                ...responseSnapshot("incomplete", finishedItems),
-                incomplete_details: { reason: "upstream_stall_timeout" },
-              },
-            });
-            reportTerminal("incomplete");
-            onCancel?.();
-            terminated = true;
-            returnIterator();
-            emitDone();
-            if (beat) clearInterval(beat);
-            beat = undefined;
-            try { controller.close(); } catch { /* already closed */ }
-            closed = true;
-            return;
-          }
           try {
             controller.enqueue(heartbeatFrame);
             emittedFrames++;

@@ -14,7 +14,6 @@ import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
-  BrowserInteractionMode,
   BrowserState,
   DoctorReport,
   Language,
@@ -155,25 +154,21 @@ function Onboarding({
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
 }) {
-  const [stage, setStage] = useState<"language" | "interaction" | "support">(
-    snapshot.state.language ? "interaction" : "language",
+  const [stage, setStage] = useState<"language" | "support">(
+    snapshot.state.language ? "support" : "language",
   );
   const [selectedLanguage, setSelectedLanguage] = useState<Language>(language);
-  const [selectedInteractionMode, setSelectedInteractionMode] = useState<BrowserInteractionMode>(
-    snapshot.state.browserInteractionMode,
-  );
   const [busy, setBusy] = useState(false);
   const localized = copyFor(selectedLanguage);
   const isLanguage = stage === "language";
-  const isInteraction = stage === "interaction";
-  const stageIndex = isLanguage ? 0 : isInteraction ? 1 : 2;
+  const stageIndex = isLanguage ? 0 : 1;
 
   const chooseLanguage = async () => {
     setBusy(true);
     setError(null);
     try {
       updateState(await api!.setLanguage(selectedLanguage));
-      setStage("interaction");
+      setStage("support");
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -197,7 +192,7 @@ function Onboarding({
     setBusy(true);
     setError(null);
     try {
-      updateState(await api!.completeOnboarding(selectedLanguage, selectedInteractionMode));
+      updateState(await api!.completeOnboarding(selectedLanguage));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -232,12 +227,8 @@ function Onboarding({
           transition={PANEL_TRANSITION}
         >
           <span className="welcome-kicker">0{stageIndex + 1}</span>
-          <h1>{isLanguage
-            ? localized.chooseLanguage
-            : isInteraction ? localized.interactionMode : localized.supportTitle}</h1>
-          <p>{isLanguage
-            ? localized.chooseLanguageHint
-            : isInteraction ? localized.interactionModeOnboardingBody : localized.supportBody}</p>
+          <h1>{isLanguage ? localized.chooseLanguage : localized.supportTitle}</h1>
+          <p>{isLanguage ? localized.chooseLanguageHint : localized.supportBody}</p>
 
           {isLanguage ? (
             <div className="welcome-options" role="radiogroup" aria-label={localized.chooseLanguage}>
@@ -252,14 +243,6 @@ function Onboarding({
                 />
               ))}
             </div>
-          ) : isInteraction ? (
-            <InteractionModePicker
-              className="welcome-interaction-mode-picker"
-              copy={localized}
-              disabled={busy}
-              mode={selectedInteractionMode}
-              onChange={setSelectedInteractionMode}
-            />
           ) : (
             <div className="welcome-options">
               <WelcomeAction
@@ -286,15 +269,15 @@ function Onboarding({
           {!isLanguage ? (
             <button
               className="text-button"
-              onClick={() => setStage(isInteraction ? "language" : "interaction")}
+              onClick={() => setStage("language")}
               type="button"
             >
               {localized.previous}
             </button>
           ) : null}
         </div>
-        <div className="welcome-progress" aria-label={`${stageIndex + 1} / 3`}>
-          {[0, 1, 2].map(index => (
+        <div className="welcome-progress" aria-label={`${stageIndex + 1} / 2`}>
+          {[0, 1].map(index => (
             <span
               className={index < stageIndex ? "is-complete" : index === stageIndex ? "is-active" : ""}
               key={index}
@@ -303,11 +286,9 @@ function Onboarding({
         </div>
         <PrimaryButton
           disabled={busy || (stage === "support" && (!snapshot.state.githubOpened || !snapshot.state.xOpened))}
-          onClick={isLanguage
-            ? chooseLanguage
-            : isInteraction ? () => setStage("support") : finish}
+          onClick={isLanguage ? chooseLanguage : finish}
         >
-          {stage === "support" ? localized.finishWelcome : localized.continue}
+          {isLanguage ? localized.continue : localized.finishWelcome}
         </PrimaryButton>
       </footer>
     </motion.main>
@@ -334,12 +315,9 @@ function LauncherShell({
   updateState: (state: LauncherState) => void;
 }) {
   const interactionSetupComplete = snapshot.state.coreSetupComplete === true
-    && (snapshot.state.browserInteractionMode === "manual"
-      || snapshot.state.codexCatalogVerified === true);
-  const firstRunZeroRiskSetup = snapshot.state.browserInteractionMode === "manual"
-    && snapshot.state.coreSetupComplete !== true;
+    && snapshot.state.codexCatalogVerified === true;
   const [surface, setSurface] = useState<Surface>(
-    firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
+    interactionSetupComplete ? "browser" : "setup",
   );
   const devProfile = snapshot.profile === "development";
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
@@ -348,10 +326,8 @@ function LauncherShell({
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
-  const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
   const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(
-    snapshot.state.browserInteractionMode === "automatic"
-      && snapshot.state.coreSetupComplete === true
+    snapshot.state.coreSetupComplete === true
       && !snapshot.state.experimentalBiggerContext,
   );
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
@@ -359,31 +335,13 @@ function LauncherShell({
   const browserSurfaceActive = surface === "browser"
     && !(compactSidebar && sidebarOpen)
     && !biggerContextRecommendationOpen;
-  const needsBrowser = snapshot.state.browserInteractionMode === "automatic"
-    && browser?.authenticated !== true;
+  const needsBrowser = browser?.authenticated !== true;
   const needsSetup = !needsBrowser && !interactionSetupComplete;
-  const mcpOptional = snapshot.state.browserInteractionMode === "automatic"
-    && snapshot.state.codexCatalogVerified === true
+  const mcpOptional = snapshot.state.codexCatalogVerified === true
     && snapshot.state.mcpSetupComplete !== true;
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
-  const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
-
-  useEffect(() => {
-    if (snapshot.state.browserInteractionMode === "manual") {
-      setBiggerContextRecommendationOpen(false);
-    }
-  }, [snapshot.state.browserInteractionMode]);
-
-  useEffect(() => {
-    if (!selectedManualTab) return;
-    setSurface("browser");
-    setSidebarOpen(false);
-    setBiggerContextRecommendationOpen(false);
-    void api!.setBrowserSurfaceActive(true).catch((cause) => setError(messageOf(cause)));
-  }, [selectedManualTab?.id, selectedManualTab?.manualState, setError]);
-
   useLayoutEffect(() => {
     let cancelled = false;
     let animationFrame = 0;
@@ -604,10 +562,7 @@ function LauncherShell({
                   badge={mcpOptional ? <ActionDot tone="optional" /> : null}
                   icon="mcp"
                   label="MCP"
-                  onClick={() => {
-                    setMcpTargetMode(null);
-                    navigateSurface("mcp");
-                  }}
+                  onClick={() => navigateSurface("mcp")}
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
@@ -652,7 +607,6 @@ function LauncherShell({
                 browser={browser}
                 browserSlotRef={browserSlotRef}
                 copy={copy}
-                interactionMode={snapshot.state.browserInteractionMode}
                 operation={operation}
                 platform={snapshot.platform}
                 setError={setError}
@@ -669,10 +623,7 @@ function LauncherShell({
                 devProfile={devProfile}
                 operation={operation}
                 setError={setError}
-                showMcp={() => {
-                  setMcpTargetMode(null);
-                  setSurface("mcp");
-                }}
+                showMcp={() => setSurface("mcp")}
                 snapshot={snapshot}
                 updateState={updateState}
               />
@@ -681,10 +632,8 @@ function LauncherShell({
               <McpSurface
                 copy={copy}
                 devProfile={devProfile}
-                interactionMode={mcpTargetMode ?? snapshot.state.browserInteractionMode}
                 language={language}
                 onDone={() => {
-                  setMcpTargetMode(null);
                   setSurface("browser");
                 }}
                 operation={operation}
@@ -698,10 +647,6 @@ function LauncherShell({
             ) : null}
             {surface === "settings" ? (
               <SettingsSurface
-                configureInteractionMode={(mode) => {
-                  setMcpTargetMode(mode);
-                  setSurface("mcp");
-                }}
                 copy={copy}
                 devProfile={devProfile}
                 language={language}
@@ -812,7 +757,6 @@ function BrowserSurface({
   browser,
   browserSlotRef,
   copy,
-  interactionMode,
   operation,
   platform,
   setError,
@@ -820,7 +764,6 @@ function BrowserSurface({
   browser: BrowserState | null;
   browserSlotRef: (node: HTMLDivElement | null) => void;
   copy: Copy;
-  interactionMode: BrowserInteractionMode;
   operation: OperationState | null;
   platform: string;
   setError: (error: string | null) => void;
@@ -830,11 +773,8 @@ function BrowserSurface({
   const [chromeProfileId, setChromeProfileId] = useState("");
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
   const visible = browser?.visible === true;
-  const manualInteraction = interactionMode === "manual";
-  const passkeyAvailable = !manualInteraction
-    && platform === "darwin"
+  const passkeyAvailable = platform === "darwin"
     && browser?.authenticated !== true;
-  const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
   const passkeyWaiting = passkeyAvailable
     && operation?.name === "passkey-login"
@@ -925,24 +865,9 @@ function BrowserSurface({
       setError(messageOf(cause));
     }
   };
-  const copyManualPrompt = async (tabId: string) => {
-    try {
-      await api!.copyManualPrompt(tabId);
-    } catch (cause) {
-      setError(messageOf(cause));
-    }
-  };
-  const confirmManualSent = async (tabId: string) => {
-    try {
-      await api!.confirmManualSent(tabId);
-    } catch (cause) {
-      setError(messageOf(cause));
-    }
-  };
-
   return (
     <section className="browser-surface">
-      <div className="browser-tab-strip" title={copy.browserTabLimit}>
+      <div className="browser-tab-strip">
         {(browser?.tabs ?? []).map((tab) => (
           <div
             className={`browser-tab${tab.active ? " is-active" : ""}`}
@@ -1044,31 +969,17 @@ function BrowserSurface({
           <SecondaryButton disabled={chromeImportBusy} onClick={() => setChromeProfiles([])}>{copy.close}</SecondaryButton>
         </div>
       ) : null}
-      {selectedManualTab
-        && ["awaiting-user", "sent"].includes(selectedManualTab.manualState ?? "") ? (
-        <ManualTurnGuide
-          copy={copy}
-          onCancel={() => void closeTab(selectedManualTab.id)}
-          onCopy={() => void copyManualPrompt(selectedManualTab.id)}
-          onSent={() => void confirmManualSent(selectedManualTab.id)}
-          tab={selectedManualTab}
-        />
-      ) : null}
       <div className="browser-viewport" ref={browserSlotRef}>
         {!visible ? (
           <div className="browser-empty">
             <BrandMark />
-            <h1>{manualInteraction
-              ? copy.browserReady
-              : browser?.authenticated ? copy.noActiveTask : copy.stepAccount}</h1>
-            <p>{manualInteraction
-              ? copy.stepAccountBody
-              : browser?.authenticated
+            <h1>{browser?.authenticated ? copy.noActiveTask : copy.stepAccount}</h1>
+            <p>{browser?.authenticated
               ? copy.noActiveTaskBody
               : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
               <PrimaryButton disabled={passkeyWaiting || chromeImportBusy} onClick={() => void toggle()}>
-                {manualInteraction || browser?.authenticated ? copy.openChatgpt : copy.signIn}
+                {browser?.authenticated ? copy.openChatgpt : copy.signIn}
               </PrimaryButton>
               {passkeyAvailable ? (
                 <SecondaryButton
@@ -1098,54 +1009,6 @@ function BrowserSurface({
   );
 }
 
-function ManualTurnGuide({
-  copy,
-  onCancel,
-  onCopy,
-  onSent,
-  tab,
-}: {
-  copy: Copy;
-  onCancel: () => void;
-  onCopy: () => void;
-  onSent: () => void;
-  tab: BrowserState["tabs"][number];
-}) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (tab.manualState !== "awaiting-user" || !tab.manualDeadlineAt) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(timer);
-  }, [tab.manualDeadlineAt, tab.manualState]);
-  const deadline = tab.manualDeadlineAt ? Date.parse(tab.manualDeadlineAt) : Number.NaN;
-  const seconds = Number.isFinite(deadline) ? Math.max(0, Math.ceil((deadline - now) / 1_000)) : 0;
-  const waiting = tab.manualState === "awaiting-user";
-  const status = waiting
-    ? `${seconds} ${copy.manualPromptSeconds}`
-    : tab.manualState === "sent"
-      ? copy.manualPromptSent
-      : tab.manualState === "running"
-        ? copy.manualPromptRunning
-        : tab.manualState === "completed"
-          ? copy.complete
-          : copy.failed;
-  return (
-    <div className={`manual-turn-guide${waiting ? " is-waiting" : ""}`}>
-      <div>
-        <strong>{waiting ? copy.manualPromptTitle : copy.manualPromptWaiting}</strong>
-        {waiting ? <p>{copy.manualPromptInstruction}</p> : null}
-      </div>
-      <span className="manual-turn-status">{status}</span>
-      <div className="manual-turn-actions">
-        <SecondaryButton onClick={onCancel}>{copy.manualPromptCancel}</SecondaryButton>
-        <SecondaryButton disabled={!tab.canCopyPrompt} onClick={onCopy}>{copy.manualPromptCopy}</SecondaryButton>
-        <PrimaryButton disabled={!tab.canConfirmSent} onClick={onSent}>{copy.manualPromptSent}</PrimaryButton>
-      </div>
-    </div>
-  );
-}
-
 function SetupSurface({
   activateBrowser,
   browser,
@@ -1168,14 +1031,11 @@ function SetupSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [localBusy, setLocalBusy] = useState(false);
-  const manualInteraction = snapshot.state.browserInteractionMode === "manual";
   const busy = localBusy
     || operation?.status === "running"
-    || (!manualInteraction && (
-      browser?.status === "loading"
-      || browser?.status === "testing"
-      || browser?.status === "running"
-    ));
+    || browser?.status === "loading"
+    || browser?.status === "testing"
+    || browser?.status === "running";
   const run = async (action: () => Promise<void>) => {
     if (busy) return;
     setLocalBusy(true);
@@ -1202,42 +1062,34 @@ function SetupSurface({
     await api!.setupCore();
     updateState((await api!.snapshot()).state);
   });
-  const setZeroRiskPro = (enabled: boolean) => run(async () => {
-    updateState(await api!.setZeroRiskPro(enabled));
-  });
-
   return (
     <ContentSurface
       eyebrow={copy.required}
-      subtitle={devProfile
-        ? copy.devSetupSubtitle
-        : manualInteraction ? copy.manualInteractionBody : copy.setupSubtitle}
+      subtitle={devProfile ? copy.devSetupSubtitle : copy.setupSubtitle}
       title={devProfile ? copy.devSetupTitle : copy.setupTitle}
     >
       <SectionHeading label={devProfile ? copy.devCoreSetup : copy.coreSetup} />
       <div className="setup-list">
-        {!manualInteraction ? <>
-          <SetupRow
-            action={browser?.authenticated
-              ? copy.signedIn
-              : browser?.status === "loading" ? copy.checkingSignIn : copy.signIn}
-            complete={browser?.authenticated === true}
-            description={copy.stepAccountBody}
-            disabled={busy}
-            index={1}
-            onAction={openLogin}
-            title={copy.stepAccount}
-          />
-          <SetupRow
-            action={snapshot.smokePassed ? copy.smokePassed : copy.runSmoke}
-            complete={snapshot.smokePassed}
-            description={copy.stepSmokeBody}
-            disabled={busy || !browser?.authenticated}
-            index={2}
-            onAction={smoke}
-            title={copy.stepSmoke}
-          />
-        </> : null}
+        <SetupRow
+          action={browser?.authenticated
+            ? copy.signedIn
+            : browser?.status === "loading" ? copy.checkingSignIn : copy.signIn}
+          complete={browser?.authenticated === true}
+          description={copy.stepAccountBody}
+          disabled={busy}
+          index={1}
+          onAction={openLogin}
+          title={copy.stepAccount}
+        />
+        <SetupRow
+          action={snapshot.smokePassed ? copy.smokePassed : copy.runSmoke}
+          complete={snapshot.smokePassed}
+          description={copy.stepSmokeBody}
+          disabled={busy || !browser?.authenticated}
+          index={2}
+          onAction={smoke}
+          title={copy.stepSmoke}
+        />
         <SetupRow
           action={snapshot.state.coreSetupComplete
             ? devProfile ? copy.devReinstall : copy.reinstall
@@ -1245,18 +1097,10 @@ function SetupSurface({
           complete={snapshot.state.codexCatalogVerified === true}
           description={devProfile ? copy.devStepInstallBody : copy.stepInstallBody}
           disabled={busy || (!snapshot.smokePassed && snapshot.state.coreSetupComplete !== true)}
-          index={manualInteraction ? 1 : 3}
+          index={3}
           onAction={install}
           repeatable
           title={devProfile ? copy.devStepInstall : copy.stepInstall}
-          titleAction={manualInteraction ? (
-            <ZeroRiskModelMenu
-              busy={busy || snapshot.state.coreSetupComplete !== true}
-              copy={copy}
-              proEnabled={snapshot.state.zeroRiskProEnabled}
-              onChange={(enabled) => void setZeroRiskPro(enabled)}
-            />
-          ) : undefined}
         />
       </div>
 
@@ -1266,10 +1110,10 @@ function SetupSurface({
         </NoticeRow>
       ) : null}
 
-      <SectionHeading label="MCP" meta={manualInteraction ? copy.required : copy.optional} spaced />
+      <SectionHeading label="MCP" meta={copy.optional} spaced />
       <button
         className="next-surface-row"
-        disabled={!manualInteraction && !snapshot.state.codexCatalogVerified}
+        disabled={!snapshot.state.codexCatalogVerified}
         onClick={showMcp}
         type="button"
       >
@@ -1288,7 +1132,6 @@ function SetupSurface({
 function McpSurface({
   copy,
   devProfile,
-  interactionMode,
   language,
   onDone,
   operation,
@@ -1298,7 +1141,6 @@ function McpSurface({
 }: {
   copy: Copy;
   devProfile: boolean;
-  interactionMode: BrowserInteractionMode;
   language: Language;
   onDone: () => void;
   operation: OperationState | null;
@@ -1306,31 +1148,20 @@ function McpSurface({
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
 }) {
-  const configuringInactiveMode = interactionMode !== snapshot.state.browserInteractionMode;
-  const [step, setStep] = useState(
-    configuringInactiveMode ? 1 : Math.min(2, Math.max(0, snapshot.state.mcpGuideStep || 0)),
-  );
+  const [step, setStep] = useState(Math.min(2, Math.max(0, snapshot.state.mcpGuideStep || 0)));
   const [tunnelId, setTunnelId] = useState("");
   const [runtimeKey, setRuntimeKey] = useState("");
-  const [credentialsConfigured, setCredentialsConfigured] = useState(
-    interactionMode === snapshot.state.browserInteractionMode
-      ? snapshot.mcpCredentialsConfigured
-      : false,
-  );
+  const [credentialsConfigured, setCredentialsConfigured] = useState(snapshot.mcpCredentialsConfigured);
   const [replacingCredentials, setReplacingCredentials] = useState(false);
   const [localBusy, setLocalBusy] = useState(false);
   const busy = localBusy || operation?.status === "running";
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
-  const verified = !configuringInactiveMode && snapshot.state.mcpSetupComplete === true;
-  const manualInteraction = interactionMode === "manual";
+  const verified = snapshot.state.mcpSetupComplete === true;
   const steps = useMemo(() => [
     { title: copy.mcpStepOne, body: copy.mcpStepOneBody },
     { title: copy.mcpStepTwo, body: copy.mcpStepTwoBody },
-    {
-      title: copy.mcpStepThree,
-      body: manualInteraction ? copy.manualMcpStepThreeBody : copy.mcpStepThreeBody,
-    },
-  ], [copy, manualInteraction]);
+    { title: copy.mcpStepThree, body: copy.mcpStepThreeBody },
+  ], [copy]);
   const guideMedia = MCP_GUIDE_MEDIA[step];
 
   const move = async (next: number) => {
@@ -1360,7 +1191,6 @@ function McpSurface({
     setError(null);
     try {
       await api!.setupMcp({
-        interactionMode,
         ...(credentialsConfigured && !replacingCredentials
           ? { replace: false }
           : { tunnelId, runtimeKey, replace: true }),
@@ -1398,7 +1228,7 @@ function McpSurface({
       subtitle={devProfile ? copy.devMcpSubtitle : copy.mcpSubtitle}
       title={devProfile ? copy.devMcpTitle : "MCP"}
     >
-      {!manualInteraction && !configuringInactiveMode && !snapshot.state.codexCatalogVerified ? (
+      {!snapshot.state.codexCatalogVerified ? (
         <NoticeRow icon="setup" tone="warning">{copy.mcpCatalogRequired}</NoticeRow>
       ) : null}
 
@@ -1513,7 +1343,7 @@ function McpSurface({
             ) : null}
             {step === 1 ? (
               <p className="mcp-step-two-hint">
-                {manualInteraction || configuringInactiveMode || snapshot.state.codexCatalogVerified
+                {snapshot.state.codexCatalogVerified
                   ? copy.mcpStepTwoHint
                   : copy.mcpCatalogRequired}
               </p>
@@ -1521,13 +1351,11 @@ function McpSurface({
             {step === 2 ? (
               <div className="connector-actions">
                 <NoticeRow icon="alert" tone="warning">
-                  {manualInteraction
-                    ? copy.manualConnectorNotice
-                    : devProfile ? copy.devConnectorIsolationNotice : copy.connectorMigrationNotice}
+                  {devProfile ? copy.devConnectorIsolationNotice : copy.connectorMigrationNotice}
                 </NoticeRow>
                 <div className="connector-name">
                   <span>{copy.connectorName}</span>
-                  <code>{snapshot.connectorNames[interactionMode]}</code>
+                  <code>{snapshot.connectorName}</code>
                 </div>
                 <div className="inline-actions">
                   <SecondaryButton
@@ -1560,7 +1388,7 @@ function McpSurface({
           <PrimaryButton
             disabled={
               busy
-              || (!manualInteraction && !configuringInactiveMode && !snapshot.state.codexCatalogVerified)
+              || !snapshot.state.codexCatalogVerified
               || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
             }
             onClick={() => void install()}
@@ -1637,7 +1465,6 @@ function ActivitySurface({
 }
 
 function SettingsSurface({
-  configureInteractionMode,
   copy,
   devProfile,
   language,
@@ -1645,7 +1472,6 @@ function SettingsSurface({
   snapshot,
   updateState,
 }: {
-  configureInteractionMode: (mode: BrowserInteractionMode) => void;
   copy: Copy;
   devProfile: boolean;
   language: Language;
@@ -1720,19 +1546,6 @@ function SettingsSurface({
       setBusy(false);
     }
   };
-  const setInteractionMode = async (mode: BrowserInteractionMode) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await api!.setBrowserInteractionMode(mode);
-      updateState(result.state);
-      if (result.credentialsRequired) configureInteractionMode(result.targetMode);
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
   const uninstallIntegration = async () => {
     setBusy(true);
     setError(null);
@@ -1761,12 +1574,6 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow> : null}
-        <InteractionModePicker
-          copy={copy}
-          disabled={busy}
-          mode={snapshot.state.browserInteractionMode}
-          onChange={(mode) => void setInteractionMode(mode)}
-        />
         <SettingRow body={copy.browserTimezoneBody} label={copy.browserTimezone}>
           <select
             aria-label={copy.browserTimezone}
@@ -1793,31 +1600,23 @@ function SettingsSurface({
         <SettingRow body={copy.showDuringTurnsBody} label={copy.showDuringTurns}>
           <Switch
             checked={snapshot.state.showBrowserDuringTurns}
-            disabled={snapshot.state.browserInteractionMode === "manual"}
             onChange={(checked) => void api!.setPreference("showBrowserDuringTurns", checked)
               .then(updateState)
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
-        <SettingRow
-          body={snapshot.state.browserInteractionMode === "manual"
-            ? copy.manualBiggerContextUnavailable
-            : copy.biggerContextBody}
-          label={copy.biggerContext}
-        >
+        <SettingRow body={copy.biggerContextBody} label={copy.biggerContext}>
           <Switch
             checked={snapshot.state.experimentalBiggerContext}
             disabled={busy
-              || snapshot.state.browserInteractionMode === "manual"
               || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setBiggerContext(checked)}
           />
         </SettingRow>
-        <SettingRow body={snapshot.state.browserInteractionMode === "manual"
-          ? copy.manualSkillAttachmentsUnavailable : copy.skillAttachmentsBody} label={copy.skillAttachments}>
+        <SettingRow body={copy.skillAttachmentsBody} label={copy.skillAttachments}>
           <Switch
             checked={snapshot.state.experimentalSkillAttachments}
-            disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
+            disabled={busy || !snapshot.state.coreSetupComplete}
             onChange={(checked) => void setSkillAttachments(checked)}
           />
         </SettingRow>
@@ -1914,7 +1713,6 @@ function SetupRow({
   secondaryAction,
   secondaryDisabled = false,
   title,
-  titleAction,
 }: {
   action: string;
   complete: boolean;
@@ -1927,7 +1725,6 @@ function SetupRow({
   secondaryAction?: string;
   secondaryDisabled?: boolean;
   title: string;
-  titleAction?: ReactNode;
 }) {
   return (
     <div className={`setup-row${complete ? " is-complete" : ""}`}>
@@ -1935,7 +1732,6 @@ function SetupRow({
       <div className="setup-row-copy">
         <div className="setup-row-heading">
           <strong>{title}</strong>
-          {titleAction}
         </div>
         <p>{description}</p>
       </div>
@@ -1949,104 +1745,6 @@ function SetupRow({
           {action}
         </SecondaryButton>
       </div>
-    </div>
-  );
-}
-
-function ZeroRiskModelMenu({
-  busy,
-  copy,
-  onChange,
-  proEnabled,
-}: {
-  busy: boolean;
-  copy: Copy;
-  onChange: (enabled: boolean) => void;
-  proEnabled: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const choose = (enabled: boolean) => {
-    setOpen(false);
-    if (enabled !== proEnabled) onChange(enabled);
-  };
-
-  return (
-    <div
-      className={`zero-risk-model-menu${open ? " is-open" : ""}`}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") setOpen(false);
-      }}
-    >
-      <button
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        aria-label={copy.zeroRiskModelSettings}
-        className="zero-risk-model-trigger"
-        disabled={busy}
-        onClick={() => setOpen((current) => !current)}
-        title={copy.zeroRiskModelSettings}
-        type="button"
-      >
-        <Icon name="settings" />
-      </button>
-      {open ? (
-        <>
-          <button
-            aria-label={`${copy.close}: ${copy.zeroRiskModelSettings}`}
-            className="zero-risk-model-scrim"
-            onClick={() => setOpen(false)}
-            type="button"
-          />
-          <div
-            aria-label={copy.zeroRiskModelSettings}
-            className="zero-risk-model-panel"
-            role="radiogroup"
-          >
-            <p>{copy.zeroRiskModelSettingsBody}</p>
-            <div className="zero-risk-model-option-row">
-              <button
-                aria-checked={!proEnabled}
-                className={!proEnabled ? "is-selected" : ""}
-                onClick={() => choose(false)}
-                role="radio"
-                type="button"
-              >
-                {!proEnabled ? <span className="zero-risk-model-radio"><Icon name="check" /></span> : null}
-                <span>
-                  <strong>{copy.zeroRiskDefaultProfile}</strong>
-                  <small>{copy.zeroRiskDefaultProfileBody}</small>
-                </span>
-              </button>
-            </div>
-            <div className="zero-risk-model-option-row has-info">
-              <button
-                aria-checked={proEnabled}
-                className={proEnabled ? "is-selected" : ""}
-                onClick={() => choose(true)}
-                role="radio"
-                type="button"
-              >
-                {proEnabled ? <span className="zero-risk-model-radio"><Icon name="check" /></span> : null}
-                <span>
-                  <strong>{copy.zeroRiskProProfile}</strong>
-                  <small>{copy.zeroRiskProProfileBody}</small>
-                </span>
-              </button>
-              <span
-                aria-label={copy.zeroRiskProProfileInfo}
-                className="zero-risk-model-info"
-                role="img"
-                tabIndex={0}
-              >
-                <Icon name="info" />
-                <span className="zero-risk-model-tooltip" role="tooltip">
-                  {copy.zeroRiskProProfileInfo}
-                </span>
-              </span>
-            </div>
-          </div>
-        </>
-      ) : null}
     </div>
   );
 }
@@ -2147,61 +1845,6 @@ function NoticeRow({
     <div className={`notice-row tone-${tone}`}>
       <Icon name={icon} />
       <span>{children}</span>
-    </div>
-  );
-}
-
-function InteractionModePicker({
-  className,
-  copy,
-  disabled,
-  mode,
-  onChange,
-}: {
-  className?: string;
-  copy: Copy;
-  disabled: boolean;
-  mode: BrowserInteractionMode;
-  onChange: (mode: BrowserInteractionMode) => void;
-}) {
-  return (
-    <div
-      aria-label={copy.interactionMode}
-      className={`interaction-mode-picker${className ? ` ${className}` : ""}`}
-      role="radiogroup"
-    >
-      <button
-        aria-checked={mode === "automatic"}
-        className={mode === "automatic" ? "is-selected" : ""}
-        disabled={disabled}
-        onClick={() => onChange("automatic")}
-        role="radio"
-        type="button"
-      >
-        {mode === "automatic" ? (
-          <span className="interaction-mode-check"><Icon name="check" /></span>
-        ) : null}
-        <span>
-          <strong>{copy.automaticInteraction}</strong>
-          <small>{copy.automaticInteractionBody}</small>
-        </span>
-      </button>
-      <button
-        aria-checked={mode === "manual"}
-        className={mode === "manual" ? "is-selected" : ""}
-        disabled={disabled}
-        onClick={() => onChange("manual")}
-        role="radio"
-        type="button"
-      >
-        {mode === "manual" ? (
-          <span className="interaction-mode-check"><Icon name="check" /></span>
-        ) : null}
-        <span>
-          <strong>{copy.manualInteraction}</strong>
-          <small>{copy.manualInteractionBody}</small>
-        </span>
-      </button>
     </div>
   );
 }

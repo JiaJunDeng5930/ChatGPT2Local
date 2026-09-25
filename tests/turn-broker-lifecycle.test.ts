@@ -67,7 +67,7 @@ test("targeted tab cancellation settles one trace and keeps a terminal replay to
   expect(sessions.getOrCreate("target", () => {
     throw new Error("a cancelled continuation must not open a new browser tab");
   }, "trace_target")).toBe(target);
-  expect(await sessions.cancelTrace("trace_target")).toBe(0);
+  expect(await sessions.cancelTrace("trace_target")).toBe(1);
   sessions.clear();
 });
 
@@ -89,11 +89,10 @@ test("native interruption retires only the exact browser turn identity", async (
       },
     };
   };
-  sessions.getOrCreate(
+  const target = sessions.getOrCreate(
     "target",
     () => runtime("target"),
     "trace_target",
-    "owner_target",
     "turn_shared",
     "thread_target",
   );
@@ -101,7 +100,6 @@ test("native interruption retires only the exact browser turn identity", async (
     "other-thread",
     () => runtime("other-thread"),
     "trace_other",
-    "owner_other",
     "turn_shared",
     "thread_other",
   );
@@ -114,14 +112,15 @@ test("native interruption retires only the exact browser turn identity", async (
   expect(cancellation.cancelled).toBe(1);
   await cancellation.settlement;
   expect(cancelled).toEqual(["target"]);
-  expect(sessions.find("target")).toBeUndefined();
+  expect(sessions.find("target")).toBe(target);
+  expect(target.settledOutcome()).toMatchObject({ type: "error" });
   expect(sessions.find("other-thread")?.nativeThreadId).toBe("thread_other");
   expect(sessions.activeCount()).toBe(1);
   sessions.clear();
 });
 
-test("session cache expiry never cancels a still-active long browser turn", async () => {
-  const sessions = new ChatGptTurnSessions(1);
+test("an in-flight execution remains registered until explicit cleanup", () => {
+  const sessions = new ChatGptTurnSessions();
   let cancelled = 0;
   const active = sessions.getOrCreate("long-turn", () => ({
     mode: "read-only",
@@ -132,7 +131,6 @@ test("session cache expiry never cancels a still-active long browser turn", asyn
     cancel: () => { cancelled += 1; },
   }));
 
-  await Bun.sleep(5);
   expect(sessions.activeCount()).toBe(1);
   expect(sessions.getOrCreate("long-turn", () => {
     throw new Error("active session must be reused");
@@ -141,7 +139,7 @@ test("session cache expiry never cancels a still-active long browser turn", asyn
   sessions.clear();
 });
 
-test("five active turns coexist and a sixth fails closed", () => {
+test("six active turns coexist and remain until explicit cleanup", () => {
   const sessions = new ChatGptTurnSessions();
   let cancelled = 0;
   const runtime = () => ({
@@ -153,43 +151,18 @@ test("five active turns coexist and a sixth fails closed", () => {
     cancel: () => { cancelled += 1; },
   });
 
-  const active = Array.from({ length: 5 }, (_unused, index) => (
+  const active = Array.from({ length: 6 }, (_unused, index) => (
     sessions.getOrCreate(`turn-${index + 1}`, runtime)
   ));
-  expect(sessions.activeCount()).toBe(5);
+  expect(sessions.activeCount()).toBe(6);
   expect(cancelled).toBe(0);
-  expect(() => sessions.getOrCreate("turn-6", runtime)).toThrow("at most 5 simultaneous browser turns");
 
   expect(sessions.getOrCreate("turn-3", () => {
     throw new Error("an in-flight turn must be reused");
   })).toBe(active[2]);
   expect(cancelled).toBe(0);
   sessions.clear();
-  expect(cancelled).toBe(5);
-});
-
-test("settled replay sessions expire from their last use instead of their creation time", async () => {
-  const sessions = new ChatGptTurnSessions(50);
-  let starts = 0;
-  const start = () => {
-    starts += 1;
-    return {
-      mode: "read-only" as const,
-      browser: Promise.resolve("done"),
-      physicalSettlement: Promise.resolve(),
-      trace: new ChatGptTraceFeed(),
-      text: new ChatGptTextFeed(),
-      cancel: () => {},
-    };
-  };
-  const first = sessions.getOrCreate("replay", start);
-  await first.browserOutcome;
-  await Bun.sleep(10);
-  expect(sessions.getOrCreate("replay", start)).toBe(first);
-  await Bun.sleep(70);
-  expect(sessions.getOrCreate("replay", start)).not.toBe(first);
-  expect(starts).toBe(2);
-  sessions.clear();
+  expect(cancelled).toBe(6);
 });
 
 test("turn broker creates its private runtime directory on a cold start", async () => {
@@ -203,7 +176,7 @@ test("turn broker creates its private runtime directory on a cold start", async 
       writableRoots: [root],
       sandboxPolicy: { type: "dangerFullAccess" },
       tools: [],
-    }, 10_000);
+    });
     if (process.platform === "win32") {
       expect(isWindowsPipeEndpoint(socketPath)).toBe(true);
     } else {
@@ -228,7 +201,7 @@ test("turn broker rejects a Unix socket path that leaves no room for sun_path's 
   }
 });
 
-test("turn broker tokens do not expire while their browser turn is still alive", async () => {
+test("turn broker capability remains usable while its owner is active", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-broker-unbounded-"));
   const socketPath = defaultBrokerEndpoint(root);
   const broker = TurnBroker.forSocket(socketPath);
@@ -239,7 +212,7 @@ test("turn broker tokens do not expire while their browser turn is still alive",
       writableRoots: [root],
       sandboxPolicy: { type: "dangerFullAccess" },
       tools: [],
-    });
+    }, "long-turn");
     await Bun.sleep(5);
     await expect(callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token }))
       .resolves.toMatchObject({ bindingId: expect.any(String) });
@@ -261,8 +234,8 @@ test("turn broker revokes only channels owned by the closed browser trace", asyn
       sandboxPolicy: { type: "dangerFullAccess" as const },
       tools: [],
     };
-    const target = await broker.register(environment, 60_000, "trace_target");
-    const other = await broker.register(environment, 60_000, "trace_other");
+    const target = await broker.register(environment, "trace_target");
+    const other = await broker.register(environment, "trace_other");
     expect(broker.revokeTrace("trace_target")).toBe(1);
     await expect(callTurnBroker(socketPath, { method: "claim", token: target }))
       .rejects.toThrow("already finished");
@@ -328,7 +301,7 @@ test("turn broker names the finished turn that owns a replayed handle", async ()
       writableRoots: [root],
       sandboxPolicy: { type: "dangerFullAccess" },
       tools: [],
-    }, 60_000, "turn-alpha");
+    }, "turn-alpha");
     await expect(callTurnBroker(socketPath, { method: "claim", token: ` ${token}` }))
       .rejects.toThrow("turn token is invalid, expired, or revoked");
     const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });

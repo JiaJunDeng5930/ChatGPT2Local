@@ -5,17 +5,7 @@ import type { AdapterEvent } from "../src/types";
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-/**
- * The watchdog exists to end a genuinely hung upstream, and it is the only thing standing between a
- * slow turn and `upstream_stall_timeout`. Its contract is therefore the reason the chatgpt-web
- * adapter must heartbeat for the whole of a turn: silence is the only signal the bridge has.
- */
-function bridged(
-  events: AsyncGenerator<AdapterEvent>,
-  stallTimeoutSec: number,
-  heartbeatMs: number,
-  now?: () => number,
-): ReadableStream<Uint8Array> {
+function bridged(events: AsyncGenerator<AdapterEvent>, heartbeatMs: number): ReadableStream<Uint8Array> {
   return bridgeToResponsesSSE(
     events,
     "chatgpt-web/test",
@@ -24,29 +14,23 @@ function bridged(
     undefined,
     undefined,
     heartbeatMs,
-    { streamPlatform: "darwin", stallTimeoutSec, ...(now ? { now } : {}) },
+    { streamPlatform: "darwin" },
   );
 }
 
-test("an adapter that goes silent past the budget is cancelled after coalesced timer ticks", async () => {
+test("upstream silence keeps the stream open for later real output", async () => {
   async function* silent(): AsyncGenerator<AdapterEvent> {
     await sleep(50);
-    yield { type: "text_delta", text: "too late" };
+    yield { type: "text_delta", text: "after silence" };
     yield { type: "done", endTurn: true };
   }
 
-  let firstClockRead = true;
-  const coalescedClock = () => {
-    if (firstClockRead) {
-      firstClockRead = false;
-      return 0;
-    }
-    return 1_500;
-  };
-  const body = await new Response(bridged(silent(), 1, 10, coalescedClock)).text();
+  const body = await new Response(bridged(silent(), 10)).text();
 
-  expect(body).toContain("upstream_stall_timeout");
-  expect(body).not.toContain("too late");
+  expect(body).toContain("event: response.heartbeat");
+  expect(body).toContain("after silence");
+  expect(body).toContain("event: response.completed");
+  expect(body).not.toContain("upstream_stall_timeout");
 });
 
 test("an adapter that keeps heartbeating is never cancelled, however long it takes", async () => {
@@ -60,7 +44,7 @@ test("an adapter that keeps heartbeating is never cancelled, however long it tak
     yield { type: "done", endTurn: true };
   }
 
-  const body = await new Response(bridged(thinkingHard(), 0.2, 10)).text();
+  const body = await new Response(bridged(thinkingHard(), 10)).text();
 
   expect(body).not.toContain("upstream_stall_timeout");
   expect(body).toContain("answer");

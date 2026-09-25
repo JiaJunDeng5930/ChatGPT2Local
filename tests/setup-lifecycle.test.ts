@@ -46,18 +46,10 @@ test("launcher setup refreshes account capabilities only when missing or explici
     extraHighAvailable: false, proAvailable: false,
   } as never)).toBe(true);
   expect(launcherCapabilityProbeRequired(verifiedLauncher as never, true)).toBe(true);
-  expect(launcherCapabilityProbeRequired({
-    ...verifiedLauncher,
-    browserInteractionMode: "manual",
-  } as never)).toBe(false);
-  expect(launcherCapabilityProbeRequired({
-    ...verifiedLauncher,
-    browserInteractionMode: "manual",
-  } as never, false, "automatic")).toBe(true);
 });
 
-for (const development of [false, true]) for (const interaction of ["manual", "automatic"] as const) {
-  test(`${development ? "DEV" : "production"} ${interaction} setup commits the tunnel inputs before its supervisor starts the runtime`, async () => {
+for (const development of [false, true]) {
+  test(`${development ? "DEV" : "production"} setup commits the tunnel inputs before its supervisor starts the runtime`, async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-web-setup-owner-"));
     const key = join(root, "runtime.key");
     writeFileSync(key, "fixture-runtime-key");
@@ -80,7 +72,6 @@ for (const development of [false, true]) for (const interaction of ["manual", "a
     try {
       const options = {
         mode: "full" as const,
-        browserInteractionMode: interaction,
         subagentProtocol: "native" as const,
         browserHostDescriptorPath: join(root, "launcher-browser.json"),
         tunnelId: `tunnel_${"a".repeat(32)}`,
@@ -91,7 +82,7 @@ for (const development of [false, true]) for (const interaction of ["manual", "a
       await listener.stop(true);
       const result = await (development ? setupDevProfile : setup)({ ...options, port });
       expect(calls).toEqual(development ? ["save"] : ["save", "integrate"]);
-      expect(saved?.tunnel?.alias).toBe(`codex-chatgpt-web${development ? "-dev" : ""}${interaction === "manual" ? "-zero-risk" : ""}`);
+      expect(saved?.tunnel?.alias).toBe(`codex-chatgpt-web${development ? "-dev" : ""}`);
       expect(result.tunnelReady).not.toBe(true);
       expect(result.connectorSetupRequired).toBe(true);
 

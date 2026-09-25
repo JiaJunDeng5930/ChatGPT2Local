@@ -1,9 +1,9 @@
 # DEV chat harness
 
 The repository DEV chat exercises current source code without routing the native Codex app through
-that working tree. It is intended for browser, MCP, tool-round, retry, and compaction development
-while the normal launcher, its ChatGPT account, and the maintainer's active Codex session remain
-usable.
+that working tree. It is intended for browser, MCP, tool-round, repeat-request, and compaction
+development while the normal launcher, its ChatGPT account, and the maintainer's active Codex
+session remain usable.
 
 ## Prerequisites
 
@@ -50,11 +50,12 @@ retention and explicit compaction without embedding a giant fixture in the user 
 directly rather than through deferred tool search so the test can prove the requested call happened.
 
 Reusing the same name continues its canonical Responses history. Sequential native messages in the
-same compaction epoch lease one Temporary Chat, exactly like production. Every message receives a
-new turn-bound MCP token, and all MCP tool rounds for that message remain inside the same ChatGPT
-response. On an exact native compaction request, the same Web agent submits the checkpoint through
-a one-shot MCP control call in that chat; only then does the surface close and the next epoch open a
-new Temporary Chat. The complete named history remains owned by the existing prompt compiler. New
+same compaction epoch may reuse one Temporary Chat, exactly like production. Every message receives
+a new turn-bound MCP token, and all MCP tool rounds for that message remain inside the same ChatGPT
+response. Each distinct canonical compaction input uses one execution through the fresh-compaction
+runtime path; repeated identical inputs attach to or replay that execution. The source Web execution
+and its page keep their normal lifecycle throughout compaction. The complete named history remains
+owned by the existing prompt compiler. New
 chats use the cheapest account-supported browser mode:
 Instant (`light`) when Sol is available, otherwise Luna. Override it with `--model` or `/model`.
 
@@ -86,7 +87,7 @@ the measured transport limit.
 **Settings → Skills as files (experimental)** is off by default in both launcher profiles.
 It uploads only skills explicitly selected in Codex and identified by native selected-skill
 metadata. Skill discovery and reading other skills through tools are unchanged. The CLI setup
-flags are `--skill-attachments` and `--inline-skills`; Zero Risk does not support automated uploads.
+flags are `--skill-attachments` and `--inline-skills`.
 
 Each UTF-8 `.txt` attachment contains the original skill envelope, including its path or resource
 authority. Its filename uses the skill name and a content digest to distinguish changed versions.
@@ -113,25 +114,23 @@ only on the compiled messages and measured browser capacities; it does not trigg
 Each stage contains complete semantic records, never a raw JSON string cut in the middle. The model
 must return an exact transaction-bound SHA-256 acknowledgement before the next part is sent.
 Images, the MCP connector, and the private `turn_token` are attached only to the final part.
-In Full/MCP mode, compaction does not replay the expanded history into an unrelated summarizer. If
-the source Web response is still waiting on a tool boundary, its canonical tool results finish that
-response first without a compaction suffix. If those results are enough for an ordinary final
-answer, that committed answer remains owned by the logical Responses turn across the physical chat
-retirement. If the Web model instead requests another tool, the broker blocks that new execution
-and tells the response to stop; the compacted continuation then resumes the unfinished work. The
-exact retained chat receives one strict checkpoint message with only the one-shot MCP control
-capability and no ordinary work capability. The checkpoint never rides in the tail of a potentially
-huge tool result, and its wait is capped at five minutes independently of the normal turn timeout.
-After the structured handoff is accepted, the bridge explicitly ends that one-purpose browser turn
-and waits for its physical launcher settlement before closing the old surface; the next epoch then
-starts a fresh Temporary Chat. This does not depend on ChatGPT rendering assistant text or a Copy
-action after the control-only response. If the retained private chat was already closed, the bridge
-starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
-has no retained MCP boundary and uses the six-message path for explicit compaction so its summarizer
-receives the complete expanded history.
+In Full/MCP mode, each distinct canonical explicit-compaction input runs once through the separate
+fresh-compaction runtime. An identical request attaches to or replays that execution. The source Web
+execution, page, CDP connection, broker, and MCP capability keep their ordinary lifecycle before,
+during, and after compaction. Compaction does not send a checkpoint through the source response,
+cancel or revoke source work, or clean up the source. It has no handoff timeout or fallback attempt.
+The result still passes through pure summary canonicalization and the normal replacement-history
+response. Browser-only mode retains the six-message summarization flow for explicit compaction and
+its complete expanded history.
 
-Any missing or malformed acknowledgement fails the whole transaction. No later part or final
-commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The adapter's
+Any missing or malformed acknowledgement remains a protocol error and is never treated as success.
+No later part or final commit is sent on that acknowledgement, and the adapter does not
+automatically retry or start a fresh Temporary Chat. Passive observation continues so the user can
+handle the page; the execution and MCP work remain available until a valid completion or explicit
+user cancellation/page closure.
+An intentional user-started Native turn is a separate execution; repeated requests for the same
+Native turn attach to its original execution because Codex's built-in OpenAI provider retry settings
+cannot be overridden. The adapter's
 aggregate browser capacity scales to 3× while the switch is active, but every individual stage must
 still fit the selected ChatGPT mode's measured one-message boundary. Web model catalog rows do not
 advertise a numeric context window or automatic compaction threshold.

@@ -1,9 +1,9 @@
 import { selectedSkillFile } from "../src/adapters/chatgpt-web/skill-attachments";
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
+import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
 import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
 import { LAUNCHER_BROWSER_HOST_KIND, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
@@ -12,6 +12,14 @@ const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+async function waitUntil(predicate: () => boolean, failure: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(failure);
+    await Bun.sleep(5);
+  }
+}
 
 test("daemon streams browser lifecycle through the real helper process", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-launcher-helper-client-"));
@@ -110,8 +118,8 @@ test("daemon streams browser lifecycle through the real helper process", async (
   }
 });
 
-test("accepted compaction retires through the helper as completed without hiding cancellations or errors", async () => {
-  const root = mkdtempSync(join(tmpdir(), "codex-helper-compaction-end-"));
+test("explicit abort retires through the helper while browser errors remain failures", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-helper-abort-end-"));
   roots.push(root);
   const helper = join(root, "helper.ts");
   writeFileSync(helper, `
@@ -120,11 +128,13 @@ test("accepted compaction retires through the helper as completed without hiding
     ChatGptBrowserWorker.prototype.run = function(turn) {
       // Substitute the browser wait only. Actual worker catch/finally, IPC and launcher end run.
       this.runStage = async () => {
+        if (turn.traceId === "actual_failure") {
+          turn.onSubmitted();
+          throw new Error("independent browser failure");
+        }
         const stopped = new Promise((resolve, reject) => {
           turn.abortSignal.addEventListener("abort", () => reject(
-            turn.traceId === "compaction_real_failure"
-              ? new Error("independent browser failure")
-              : new DOMException("ChatGPT web turn aborted", "AbortError")
+            new DOMException("ChatGPT web turn aborted", "AbortError")
           ), { once: true });
         });
         turn.onSubmitted();
@@ -140,7 +150,7 @@ test("accepted compaction retires through the helper as completed without hiding
     async fetch(request) {
       const body = await request.json() as Record<string, unknown>;
       if (body.phase === "start") return Response.json({
-        ok: true, surfaceId: "launcher_surface_id_0123456789AB", reused: true, connectorBound: true,
+        ok: true, surfaceId: "launcher_surface_id_0123456789AB", reused: false, connectorBound: true,
       });
       if (body.phase === "end") ended.set(body.traceId as string, body);
       return Response.json({ ok: true, cancelledByUser: false });
@@ -165,40 +175,156 @@ test("accepted compaction retires through the helper as completed without hiding
   const logs: string[] = [];
   const logger = spyOn(console, "info").mockImplementation((...args) => { logs.push(args.join(" ")); });
   try {
-    for (const [traceId, reason, status] of [
-      ["compaction_accepted", new ChatGptCompactionHandoffAccepted(), "completed"],
-      ["compaction_cancelled", new DOMException("user cancelled", "AbortError"), "aborted"],
-      ["compaction_same_text", new DOMException("Structured compaction handoff accepted", "AbortError"), "aborted"],
-      ["compaction_deadline", new Error("compaction deadline exceeded"), "aborted"],
-      ["compaction_real_failure", new ChatGptCompactionHandoffAccepted(), "failed"],
+    for (const [traceId, status] of [
+      ["explicit_abort", "aborted"],
+      ["actual_failure", "failed"],
     ] as const) {
       const controller = new AbortController();
       let released = false;
-      const prepare = async () => ({ text: "checkpoint instruction", images: [], release: () => { released = true; } });
+      const prepare = async () => ({ text: "inspect", images: [], release: () => { released = true; } });
       await expect(client.run({
         traceId, modelId: "gpt-5.6-sol", reasoning: "high",
         capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
-        nativeConnector: true, conversationKey: "a".repeat(64), requireRetainedConversation: true,
-        prepare, prepareResume: prepare, abortSignal: controller.signal,
-        onSubmitted: () => { controller.abort(reason); }, onTextDelta() {},
-      })).rejects.toThrow(traceId === "compaction_real_failure"
-        ? "independent browser failure"
-        : traceId === "compaction_accepted" ? "Structured compaction handoff accepted" : "ChatGPT web turn aborted");
+        prepare, abortSignal: controller.signal,
+        onSubmitted: () => {
+          if (traceId === "explicit_abort") controller.abort(new DOMException("user cancelled", "AbortError"));
+        },
+        onTextDelta() {},
+      })).rejects.toThrow(traceId === "actual_failure" ? "independent browser failure" : "ChatGPT web turn aborted");
       // Logical outcome is observed only after the real helper's launcher retirement handshake.
       expect(ended.get(traceId)?.status).toBe(status);
-      expect(ended.get(traceId)?.retain).toBeUndefined();
       expect(released).toBeTrue();
     }
     await client.close();
-    expect(logs.some(line => line.includes("compaction_accepted ended after accepted structured compaction handoff"))).toBeTrue();
-    expect(logs.some(line => line.includes("compaction_accepted failed:"))).toBeFalse();
-    for (const traceId of ["compaction_cancelled", "compaction_same_text", "compaction_deadline", "compaction_real_failure"]) {
-      expect(logs.some(line => line.includes(`${traceId} failed:`))).toBeTrue();
-    }
+    expect(logs.some(line => line.includes("explicit_abort failed:"))).toBeTrue();
+    expect(logs.some(line => line.includes("actual_failure failed:") && line.includes("independent browser failure"))).toBeTrue();
   } finally {
     await client.close();
     logger.mockRestore();
     await server.stop(true);
+  }
+});
+
+test("malformed helper output preserves turns and an exited helper waits for explicit abort", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-helper-passive-lifecycle-"));
+  roots.push(root);
+  const helper = join(root, "helper.ts");
+  const startsPath = join(root, "starts");
+  const malformedPath = join(root, "malformed-sent");
+  const releaseMalformedPath = join(root, "release-malformed");
+  const exitPendingPath = join(root, "exit-pending");
+  const exitPath = join(root, "exit-now");
+  const exitedPath = join(root, "exited");
+  writeFileSync(helper, `
+    import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+    import { createInterface } from "node:readline";
+    const startsPath = ${JSON.stringify(startsPath)};
+    const malformedPath = ${JSON.stringify(malformedPath)};
+    const releaseMalformedPath = ${JSON.stringify(releaseMalformedPath)};
+    const exitPendingPath = ${JSON.stringify(exitPendingPath)};
+    const exitPath = ${JSON.stringify(exitPath)};
+    const exitedPath = ${JSON.stringify(exitedPath)};
+    const emit = message => process.stdout.write(JSON.stringify(message) + "\\n");
+    appendFileSync(startsPath, "started\\n");
+    emit({ type: "ready" });
+    const input = createInterface({ input: process.stdin });
+    input.on("line", line => {
+      const message = JSON.parse(line);
+      if (message.type === "shutdown") process.exit(0);
+      if (message.type !== "run") return;
+      if (message.id === "malformed-output") {
+        writeFileSync(malformedPath, "sent");
+        emit({ type: "result", id: message.id, text: 42 });
+        const timer = setInterval(() => {
+          if (!existsSync(releaseMalformedPath)) return;
+          clearInterval(timer);
+          emit({ type: "result", id: message.id, text: "recovered" });
+        }, 5);
+      } else if (message.id === "after-exit") {
+        emit({ type: "result", id: message.id, text: "unexpected helper restart" });
+      } else if (message.id === "exit-pending") {
+        writeFileSync(exitPendingPath, "received");
+        const timer = setInterval(() => {
+          if (!existsSync(exitPath)) return;
+          clearInterval(timer);
+          writeFileSync(exitedPath, "exiting");
+          process.exit(23);
+        }, 5);
+      }
+    });
+  `, { mode: 0o700 });
+
+  const descriptorPath = join(root, "launcher.json");
+  writeFileSync(descriptorPath, JSON.stringify({
+    version: 3, kind: LAUNCHER_BROWSER_HOST_KIND, profile: "production", pid: process.pid,
+    endpoint: "http://127.0.0.1:39001",
+    control: { endpoint: "http://127.0.0.1:39002", token: "launcher-control-token-0123456789abcdefghijklmnop" },
+    helper: { executable: process.execPath, script: helper },
+    partition: "persist:codex-web-gpt-chatgpt", idleUrl: LAUNCHER_BROWSER_IDLE_URL,
+    surfaceId: "launcher_surface_id_0123456789AB", createdAt: new Date().toISOString(),
+    surfaceTargets: { launcher_surface_id_0123456789AB: "native-owned-target" },
+  }), { mode: 0o600 });
+  const client = new LauncherBrowserHelperClient({
+    appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: descriptorPath,
+    browserHelperScriptPath: helper,
+    storageStatePath: join(root, "unused-state.json"), chromeExecutablePath: join(root, "unused-chrome"),
+    turnTimeoutMs: 60_000, headed: true, autoApproveToolCalls: false,
+  });
+  const internal = client as unknown as { child?: unknown; helperError?: Error };
+  const logs: string[] = [];
+  const logger = spyOn(console, "error").mockImplementation((...args) => { logs.push(args.join(" ")); });
+  const warningLogger = spyOn(console, "warn").mockImplementation((...args) => { logs.push(args.join(" ")); });
+  const infoLogger = spyOn(console, "info").mockImplementation((...args) => { logs.push(args.join(" ")); });
+  const makeTurn = (traceId: string, abortSignal?: AbortSignal): BrowserTurn => ({
+    traceId,
+    modelId: "gpt-5.6-sol",
+    reasoning: "high",
+    capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
+    ...(abortSignal ? { abortSignal } : {}),
+    prepare: async () => ({ text: "inspect", images: [], release() {} }),
+    onTextDelta() {},
+  });
+  try {
+    let malformedTurnSettled = false;
+    const malformedTurn = client.run(makeTurn("malformed-output")).then(
+      value => { malformedTurnSettled = true; return { value }; },
+      error => { malformedTurnSettled = true; return { error }; },
+    );
+    await waitUntil(() => existsSync(malformedPath), "helper did not emit the malformed frame");
+    await waitUntil(
+      () => malformedTurnSettled || logs.some(line => line.includes("Launcher browser helper result text is invalid")),
+      "malformed helper output was neither logged nor handled",
+    );
+    expect(logs.some(line => line.includes("Launcher browser helper result text is invalid"))).toBeTrue();
+    expect(malformedTurnSettled).toBe(false);
+
+    writeFileSync(releaseMalformedPath, "continue");
+    expect(await malformedTurn).toEqual({ value: "recovered" });
+
+    const controller = new AbortController();
+    let exitedTurnSettled = false;
+    const exitedTurn = client.run(makeTurn("exit-pending", controller.signal)).then(
+      value => { exitedTurnSettled = true; return { value }; },
+      error => { exitedTurnSettled = true; return { error }; },
+    );
+    await waitUntil(() => existsSync(exitPendingPath), "helper did not receive the pending turn");
+    writeFileSync(exitPath, "exit");
+    await waitUntil(() => existsSync(exitedPath), "helper did not reach the controlled exit");
+    await waitUntil(() => internal.helperError !== undefined || exitedTurnSettled, "client did not observe helper exit");
+    expect(exitedTurnSettled).toBe(false);
+    expect(internal.helperError?.message).toContain("status 23");
+    await expect(client.run(makeTurn("after-exit"))).rejects.toThrow("status 23");
+    expect(internal.helperError?.message).toContain("status 23");
+    expect(readFileSync(startsPath, "utf8").trim().split("\n")).toEqual(["started"]);
+
+    controller.abort();
+    const outcome = await exitedTurn;
+    expect("error" in outcome ? outcome.error : undefined).toMatchObject({ name: "AbortError" });
+  } finally {
+    await client.close();
+    logger.mockRestore();
+    warningLogger.mockRestore();
+    infoLogger.mockRestore();
   }
 });
 
@@ -291,10 +417,12 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
     autoApproveToolCalls: false,
   });
   const internal = client as unknown as {
+    child?: { exitCode: number | null; signalCode: string | null };
     ensureChild(): Promise<void>;
     send(message: { type: string; id?: string }): Promise<void>;
     finishWithError(id: string, error: Error): void;
   };
+  internal.child = { exitCode: null, signalCode: null };
   internal.ensureChild = async () => {};
   internal.send = async message => {
     messages.push(message.type);

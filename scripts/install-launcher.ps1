@@ -5,23 +5,6 @@ if ($PSVersionTable.PSVersion.Major -lt 6) {
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 }
 
-function Invoke-WithRetry {
-  param(
-    [Parameter(Mandatory = $true)][scriptblock]$Operation,
-    [Parameter(Mandatory = $true)][string]$Label
-  )
-  for ($Attempt = 1; $Attempt -le 3; $Attempt++) {
-    try {
-      return & $Operation
-    } catch {
-      if ($Attempt -eq 3) {
-        throw "$Label failed after $Attempt attempts: $($_.Exception.Message)"
-      }
-      Start-Sleep -Seconds (2 * $Attempt)
-    }
-  }
-}
-
 function Test-IsFullyQualifiedWindowsPath {
   param([AllowEmptyString()][string]$Path)
   return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))'
@@ -33,9 +16,7 @@ if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
 }
 $Version = $env:CODEX_WEB_GPT_VERSION
 if (-not $Version) {
-  $Release = Invoke-WithRetry -Label "Resolving the latest release" -Operation {
-    Invoke-RestMethod "https://api.github.com/repos/$Repository/releases/latest" -TimeoutSec 60
-  }
+  $Release = Invoke-RestMethod "https://api.github.com/repos/$Repository/releases/latest" -TimeoutSec 60
   $Version = [string]$Release.tag_name
 }
 if ($Version -and $Version.StartsWith("v")) { $Version = $Version.Substring(1) }
@@ -57,14 +38,8 @@ try {
   }
   $Installer = Join-Path $Temp $Asset
   $Checksums = Join-Path $Temp "checksums.txt"
-  $null = Invoke-WithRetry -Label "Downloading $Asset" -Operation {
-    Remove-Item $Installer -Force -ErrorAction SilentlyContinue
-    Invoke-WebRequest "$BaseUrl/$Asset" -OutFile $Installer -TimeoutSec 900 -UseBasicParsing
-  }
-  $null = Invoke-WithRetry -Label "Downloading checksums.txt" -Operation {
-    Remove-Item $Checksums -Force -ErrorAction SilentlyContinue
-    Invoke-WebRequest "$BaseUrl/checksums.txt" -OutFile $Checksums -TimeoutSec 60 -UseBasicParsing
-  }
+  Invoke-WebRequest "$BaseUrl/$Asset" -OutFile $Installer -TimeoutSec 900 -UseBasicParsing
+  Invoke-WebRequest "$BaseUrl/checksums.txt" -OutFile $Checksums -TimeoutSec 60 -UseBasicParsing
   $ExpectedLine = Get-Content $Checksums | Where-Object { $_ -match "\s$([regex]::Escape($Asset))$" } | Select-Object -First 1
   if (-not $ExpectedLine) { throw "checksums.txt has no entry for $Asset" }
   $Expected = ($ExpectedLine -split "\s+")[0].ToLowerInvariant()

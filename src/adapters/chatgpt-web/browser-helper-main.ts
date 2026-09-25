@@ -3,7 +3,7 @@ import { createInterface } from "node:readline";
 import { stdin, stderr, stdout } from "node:process";
 import type { CodexProviderConfig } from "../../types";
 import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
-import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
+import { ChatGptWebAdapterError } from "./adapter-error";
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
@@ -66,14 +66,13 @@ type InputMessage = RunMessage
   | { type: "completion_fence_begin_ack"; id: string; requestId: number; revision: number | null }
   | { type: "completion_fence_commit_ack"; id: string; requestId: number; committed: boolean }
   | { type: "progress"; id: string; snapshot: ChatGptExternalTurnProgressSnapshot }
-  | { type: "abort"; id: string; reason?: "compaction_handoff_accepted" }
+  | { type: "abort"; id: string }
   | { type: "shutdown" };
 
 let outputFailure: Error | undefined;
 const handleOutputFailure = (error: Error): void => {
   if (outputFailure) return;
   outputFailure = error;
-  void requestShutdown();
 };
 const protocolOutput = createProcessLineWriter(stdout, handleOutputFailure);
 const diagnosticOutput = createProcessLineWriter(stderr, handleOutputFailure);
@@ -457,9 +456,7 @@ input.on("line", line => {
       );
     }
   } else if (message.type === "abort") {
-    abortControllers.get(message.id)?.abort(message.reason === "compaction_handoff_accepted"
-      ? new ChatGptCompactionHandoffAccepted()
-      : undefined);
+    abortControllers.get(message.id)?.abort();
     preparedSelections.get(message.id)?.cancel();
     const waiter = sendActivationWaiters.get(message.id);
     sendActivationWaiters.delete(message.id);
@@ -501,7 +498,7 @@ input.on("line", line => {
   }
 });
 input.on("close", () => {
-  void requestShutdown();
+  console.error("[chatgpt-web-helper] stdin closed; waiting for explicit shutdown or process signal");
 });
 process.once("SIGINT", () => {
   void requestShutdown();

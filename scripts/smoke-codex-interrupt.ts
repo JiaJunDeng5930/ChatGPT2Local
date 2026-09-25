@@ -70,7 +70,6 @@ const server = startServer(config, {
           },
         }),
         "interrupt-smoke",
-        `interrupt-smoke-owner:${identity.threadId}`,
         identity.turnId,
         identity.threadId,
       );

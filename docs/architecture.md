@@ -8,7 +8,7 @@ launcher-owned codex-chatgpt-web daemon
   ├─ official /models passthrough + fixed ChatGPT Web models
   ├─ native Responses passthrough or ChatGPT Responses/SSE bridge
   ├─ authenticated native Search and Image Gen request forwarding
-  ├─ ChatGPT browser worker (up to five task-bound Electron tabs)
+  ├─ ChatGPT browser worker (task-bound Electron tabs)
   ├─ capability broker (full mode only)
   └─ stdio MCP server
             ▲
@@ -82,16 +82,31 @@ and development connectors installed without renaming, refreshing, or deleting e
 
 ## Browser lifecycle
 
-The desktop launcher owns one persistent Electron partition and up to five task-bound browser
-tabs. Each task/model/effort/compaction epoch owns one exact `WebContentsView` lease; sequential
-native messages reuse that surface, while each message receives a fresh turn-bound MCP token and
-keeps all of its MCP tool rounds inside one ChatGPT response. Compaction asks the same retained Web
-agent for a one-shot structured checkpoint, waits for the response and physical helper cleanup,
-then closes the old surface. The next epoch gets a new Temporary Chat. Model messages never copy
-state between tabs. Tabs share only the local login
-partition and keep independent documents and lifecycles. Closing a running tab destroys its page
-and terminates that browser turn. A sixth concurrent turn fails explicitly; the cap avoids excessive
-parallel traffic that could trigger account abuse controls.
+The desktop launcher owns one persistent Electron partition and task-bound browser tabs. Each
+task/model/effort/compaction epoch owns a `WebContentsView`; sequential native messages may reuse a
+successfully retained chat under the existing reuse rules, while each message receives a fresh
+turn-bound MCP token and keeps all of its MCP tool rounds inside one ChatGPT response. There is no
+fixed tab or concurrent-turn limit, and capacity pressure does not evict a page. Each canonical
+compaction input uses one execution through the existing fresh-compaction runtime path;
+identical inputs attach to or replay that execution. Compaction does not hand off, cancel, revoke, or
+repurpose the source page or its runtime, and it has no timeout, fallback attempt, or source cleanup.
+Model messages never copy state between tabs. Tabs share only the local login partition and keep
+independent documents and lifecycles. Explicitly closing a running tab ends its matching browser
+turn; a closed page is not recreated automatically.
+
+Normal completion returns the real output and releases running execution capacity, but leaves the
+page and its CDP connection open until the user closes it or the application shuts down. Page error
+controls and text, heartbeat silence, stale menus, observation faults, and instruction changes do
+not trigger an automatic abort, reload, resend, rebind, disconnect, eviction, or capability
+revocation. Page error markers remain observation data: they cannot be reported as a successful
+answer, and passive observation continues so the user can handle the page and let it complete.
+Other observation exceptions are recorded and the failed observation operation is not retried; the
+attached request, page, connection, and MCP broker remain until explicit cancellation or page
+closure. A request disconnect only detaches its observer. Repeated requests for the same Native
+turn attach to or replay the original execution. Codex's built-in OpenAI provider
+cannot be overridden to disable Native transport retries, so this project does not claim to disable
+them or create new browser work for a repeated request. Active page ownership and MCP capabilities
+do not expire automatically. See [ADR 0006](adr/0006-explicit-browser-execution-lifecycle.md).
 
 Browser submission and response binding use ChatGPT's logical `data-turn-id`, not the
 `conversation-turn-N` display index, which can change during rendering. The submission baseline
@@ -111,19 +126,13 @@ out of the JSON and are attached natively with stable references. The runtime do
 context JSONL file, upload a synthetic context document, include prompt hashes, or silently truncate
 the envelope. Attachment acceptance and send readiness are verified before the turn begins.
 
-Initial Launcher setup asks which interaction mode to install and defaults to With Automation. The
-same choice remains available in Settings; changing it uses the transactional setup path, replaces
-the installed catalog, and requires a Codex restart. Zero Risk never reads or mutates the ChatGPT DOM.
-For a new ChatGPT chat the adapter provides the complete compiled prompt; for an exactly retained
-chat it also provides an incremental prompt containing only the Codex suffix after the last assistant
-reply. The Launcher chooses between those two prompts from its own retained-tab ownership and writes
-the selected text to the system clipboard. The user has thirty seconds to paste, select the visible
-ChatGPT model, effort, and Zero Risk connector, send, and confirm Sent; a manual compaction handoff
-allows two minutes. Sent ends that confirmation deadline. Waiting for the first MCP bind is part of
-the live turn, which remains subject to explicit cancellation and runtime-owner cleanup.
-The pasted task carries one opaque `request_id` for routing concurrent requests. Start/completion
-sequencing lives in the Zero Risk MCP server metadata, not in user-authored imperative text; the
-per-tab nonce used to validate the Launcher confirmation never leaves the local runtime.
+Browser-only and Full harness use the same automatic browser interaction path. Browser-only sends
+turns through the embedded browser; Full harness also exposes local Codex tools through MCP. For a
+new ChatGPT chat the adapter provides the complete compiled prompt; for an exactly retained chat it
+provides only the Codex suffix after the last assistant reply. The Launcher selects between these
+prompts from its retained-tab ownership and sends the selected text to its owned ChatGPT page. In
+Full harness mode, the turn waits for the first MCP bind and remains subject to explicit user
+cancellation and application shutdown.
 
 Routed ChatGPT Web catalog rows leave their numeric context and automatic-compaction fields unset,
 so Codex does not schedule a Web compaction from a token threshold. The adapter separately counts
@@ -142,21 +151,13 @@ parts, then six parts based on measured physical capacity; preflight fails expli
 still exceed it. More parts reduce message size, not the amount of history retained. Explicit
 compaction remains a separate request path and may use the existing six-part summarization flow.
 
-In Full mode, explicit routed compaction v1/v2 uses the exact retained source agent and a one-shot
-MCP control capability that accepts only the bound checkpoint; it cannot claim or invoke the ordinary
-Codex tool environment. Zero Risk uses its measured browser input capacity and does not enable
-Bigger Context multipart transport. When explicit compaction is requested, its active ChatGPT
-response receives the checkpoint instruction as an MCP result, returns the compacted context through
-its bound completion control, and ends. The old manual chat is retired; the next compacted Codex request owns a fresh
-Temporary Chat and its locally compiled prompt is copied to the clipboard. A missing Automatic
-retained source falls back to a dedicated read-only Temporary Chat built from canonical Codex
-history; a missing Zero Risk source uses the same explicit manual checkpoint contract. An invalid or
-ambiguous handoff still fails explicitly. Browser-only mode
-uses the same read-only summarization path, then returns the native replacement-history shape expected
-by Codex. A prompt-level checkpoint marker is translated into a visible Codex trace item;
-every later tool action in the same turn continues to present the current turn capability. Visible
-ChatGPT status rows become reasoning summaries, while stable prose between rows becomes native
-Codex commentary.
+Each distinct canonical explicit-compaction input uses one execution through the existing
+fresh-compaction runtime path. An identical request attaches to or replays that execution. The
+ordinary source execution and its page, CDP connection, MCP broker, and capability keep their normal
+lifecycle before, during, and after compaction. Compaction does not hand off a checkpoint through the
+source response or clean up the source, and has no handoff timeout or fallback attempt. Pure summary
+canonicalization and the normal replacement-history response remain unchanged. Browser-only mode
+retains its six-part summarization flow.
 
 ## Installation and service lifecycle
 
@@ -234,8 +235,8 @@ launcher error.
 - Store browser state and tunnel credentials under the application home with mode `0600`.
 - Protect lifecycle control endpoints with a random application-owned bearer token.
 - Never place secret values in command-line arguments, logs, generated profiles, or Git.
-- Limit browser turns to five independent task-bound tabs and reject unsupported models explicitly.
+- Reject unsupported models explicitly.
   The selected routed model fixes the adapter effort; a conflicting request effort cannot change it.
-- Do not retry or switch modes to evade product usage limits.
+- Do not manually retry or switch modes to evade product usage limits.
 
 See the complete [security model](security-model.md).

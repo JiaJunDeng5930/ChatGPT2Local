@@ -130,12 +130,130 @@ test("launcher runtime ownership rejects a different browser descriptor", () => 
   );
 });
 
+test("launcher supervisor prefers legacy automatic fields without rewriting persisted config", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-supervisor-legacy-auto-"));
+  const descriptorPath = path.join(root, "launcher-browser.json");
+  const automaticTunnel = {
+    binaryPath: path.join(root, "automatic-client"),
+    tunnelId: "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    runtimeKeyFile: path.join(root, "automatic-runtime.key"),
+    profileDir: path.join(root, "automatic-profiles"),
+    profileName: "automatic-profile",
+    alias: "automatic-alias",
+  };
+  const config = launcherConfig(descriptorPath, {
+    mode: "full",
+    browserInteractionMode: "automatic",
+    automaticAppName: "Codex Native2",
+    automaticTunnel,
+    manualAppName: "Obsolete manual name",
+    manualTunnel: {
+      ...automaticTunnel,
+      tunnelId: "tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      profileName: "obsolete-manual-profile",
+      alias: "obsolete-manual-alias",
+    },
+    zeroRiskProEnabled: true,
+  });
+  const configPath = path.join(root, "config.json");
+  const rawConfig = `${JSON.stringify(config)}\n`;
+  fs.writeFileSync(configPath, rawConfig);
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+
+  try {
+    for (const read of [() => supervisor.readConfig(), () => supervisor.readSetupConfig()]) {
+      const normalized = read();
+      assert.equal(normalized.appName, "Codex Native2");
+      assert.deepEqual(normalized.tunnel, automaticTunnel);
+      for (const key of [
+        "browserInteractionMode",
+        "automaticAppName",
+        "manualAppName",
+        "zeroRiskProEnabled",
+        "automaticTunnel",
+        "manualTunnel",
+      ]) {
+        assert.equal(Object.hasOwn(normalized, key), false);
+      }
+    }
+    assert.equal(fs.readFileSync(configPath, "utf8"), rawConfig);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launcher supervisor discards obsolete manual tunnels and restores profile defaults", () => {
+  for (const { launcherProfile, purpose, expectedAppName } of [
+    { launcherProfile: "production", purpose: undefined, expectedAppName: "Codex Native2" },
+    { launcherProfile: "development", purpose: "dev-harness", expectedAppName: "Codex Native2 DEV" },
+  ]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-supervisor-legacy-manual-"));
+    const descriptorPath = path.join(root, "launcher-browser.json");
+    const obsoleteTunnel = {
+      binaryPath: path.join(root, "manual-client"),
+      tunnelId: "tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      runtimeKeyFile: path.join(root, "manual-runtime.key"),
+      profileDir: path.join(root, "manual-profiles"),
+      profileName: "obsolete-manual-profile",
+      alias: "obsolete-manual-alias",
+    };
+    const config = launcherConfig(descriptorPath, {
+      mode: "full",
+      purpose,
+      appName: "Obsolete manual name",
+      tunnel: obsoleteTunnel,
+      browserInteractionMode: "manual",
+      manualAppName: "Obsolete manual name",
+      manualTunnel: obsoleteTunnel,
+      zeroRiskProEnabled: true,
+    });
+    const configPath = path.join(root, "config.json");
+    const rawConfig = `${JSON.stringify(config)}\n`;
+    fs.writeFileSync(configPath, rawConfig);
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: descriptorPath,
+      launcherProfile,
+    });
+
+    try {
+      for (const read of [() => supervisor.readConfig(), () => supervisor.readSetupConfig()]) {
+        const normalized = read();
+        assert.equal(normalized.appName, expectedAppName);
+        assert.equal(Object.hasOwn(normalized, "tunnel"), false);
+        for (const key of [
+          "browserInteractionMode",
+          "automaticAppName",
+          "manualAppName",
+          "zeroRiskProEnabled",
+          "automaticTunnel",
+          "manualTunnel",
+        ]) {
+          assert.equal(Object.hasOwn(normalized, key), false);
+        }
+      }
+      assert.equal(fs.readFileSync(configPath, "utf8"), rawConfig);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("launcher runtime ownership cannot cross production and DEV profiles", () => {
   const descriptorPath = path.join(os.tmpdir(), "launcher.json");
   const production = { ...launcherConfig(descriptorPath), solAvailable: true };
   const development = { ...production, purpose: "dev-harness" };
-  assert.equal(validateConfig(production, descriptorPath, process.platform, "production"), production);
-  assert.equal(validateConfig(development, descriptorPath, process.platform, "development"), development);
+  assert.deepEqual(validateConfig(production, descriptorPath, process.platform, "production"), production);
+  assert.deepEqual(validateConfig(development, descriptorPath, process.platform, "development"), development);
   assert.throws(
     () => validateConfig(development, descriptorPath, process.platform, "production"),
     /Production launcher refuses a DEV harness/,
@@ -255,7 +373,7 @@ test("launcher runtime validation accepts native Windows paths and a named pipe"
     controlToken: "runtime-supervisor-control-token-0123456789abcdef",
     runtimeCommand: ["C:\\Users\\Example\\.codex-chatgpt-web\\runtime\\bun.exe"],
   };
-  assert.equal(validateConfig(config, descriptorPath, "win32"), config);
+  assert.deepEqual(validateConfig(config, descriptorPath, "win32"), config);
 });
 
 test("launcher delegates long-lived tunnel supervision to native runtimes connect", () => {
@@ -1409,8 +1527,7 @@ test("explicit launcher shutdown cancels active turns before the graceful stop",
   assert.deepEqual(actions, ["cancel-turns", "graceful-stop"]);
 });
 
-for (const reason of [undefined, "browser_surface_bootstrap_timeout", "helper_heartbeat_expired"])
-test(`launcher supervisor forwards exact trace cancellation: ${reason ?? "user close"}`, async () => {
+test("launcher supervisor forwards exact trace cancellation for user close", async () => {
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
     logger: { info() {}, warn() {}, error() {} },
@@ -1422,7 +1539,7 @@ test(`launcher supervisor forwards exact trace cancellation: ${reason ?? "user c
   supervisor.daemon = { exitCode: null, signalCode: null };
   supervisor.control = async (_config, action, options) => {
     assert.equal(action, "cancel-turn");
-    assert.deepEqual(options.body, { traceId: "trace_exact", ...(reason ? { reason } : {}) });
+    assert.deepEqual(options.body, { traceId: "trace_exact" });
     assert.equal(options.timeoutMs, 15_000);
     return {
       status: "ok",
@@ -1432,7 +1549,7 @@ test(`launcher supervisor forwards exact trace cancellation: ${reason ?? "user c
     };
   };
 
-  const result = await supervisor.cancelBrowserTurn("trace_exact", reason);
+  const result = await supervisor.cancelBrowserTurn("trace_exact");
   assert.equal(result.trace_id, "trace_exact");
 });
 

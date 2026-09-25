@@ -132,28 +132,33 @@ being inserted as an extra reviewer after the Web tool call already completed.
 
 These are result boundaries, not one diagnosis. The bridge uses them when it cannot prove a complete
 ChatGPT turn. Common causes include an account-side rate limit, ChatGPT's own "Something went wrong"
-state, a changed UI control, a closed browser surface, a conflicting route, or a tool that exceeded
-its bounded MCP deadline.
+state, a changed UI control, a closed browser surface, a conflicting route, or an MCP result that
+has not arrived.
 
-- Read the final detailed error after the reconnect attempts; do not report only the word
-  `Reconnecting`.
-- Retry once in a fresh Codex task. State whether the fresh task works and whether the failure is
-  consistent.
+- Read the latest detailed error and inspect the page; do not diagnose from the word `Reconnecting`
+  alone. A page error marker is observation data, never a successful answer; passive observation
+  continues while you handle the page. It does not trigger a reload, resend, close, or capability
+  revocation. A separate observation-operation exception does not cancel or remove the page, its
+  connection, or its MCP work.
+- Codex may repeat a Native request, and its built-in provider retry settings cannot be overridden
+  by this project. Repeated requests for the same Native turn attach to the original execution and
+  do not submit browser work again. For a deliberate independent retry, explicitly stop or close the
+  prior run and start a fresh Codex task; that is a new execution.
 - Run **Settings → Run doctor** and export a safe log immediately after the failure.
 - Include the exact model, Browser-only or Full harness mode, whether tools ran, and whether the
   ChatGPT page showed a final answer.
 
-Do not assume that a generic 502 means the Tunnel is broken. Since v4.0.7, a native tool that
-outlives its turn binding is reported explicitly as `codex_tool_timeout` and retired rather than
-being presented as an ambiguous proxy success.
+Do not assume that a generic 502 means the Tunnel is broken. A request disconnection or observation
+failure does not expire the page's MCP capability or cancel in-flight tool work.
 
 ## Native compaction returns `404 Not Found`
 
 For an ordinary Codex model, `/v1/responses/compact` forwards to the native legacy compact
 endpoint. That endpoint can return an upstream 404 even when the model and authorization work.
 Check whether a config layer sets `[features].remote_compaction_v2 = false`. Current Codex enables
-V2 by default; remove that override or set the existing key to `true`, then restart Codex and retry
-compaction on the same native model. V2 uses `/responses` with a compaction trigger.
+V2 by default; remove that override or set the existing key to `true`, then restart Codex and
+manually request compaction again on the same native model. V2 uses `/responses` with a compaction
+trigger.
 
 If it still fails, include the effective feature setting, selected model, exact failure time and
 safe log. `native_compaction_upstream_failed` records the route, model, HTTP status and available
@@ -162,13 +167,14 @@ still requires its own diagnosis; changing the native protocol does not increase
 
 ## ChatGPT says the account is temporarily limited
 
-The bridge permits at most five simultaneous browser tabs as an account-safety ceiling. Five is not
-a recommended concurrency setting, and ChatGPT does not expose a stable numeric quota or cooldown.
-Some accounts have reached a limit with only two turns started close together.
+The bridge does not impose a fixed browser-tab or concurrent-turn limit, and ChatGPT does not expose
+a stable numeric account quota or cooldown. Some accounts have reached a limit with only two turns
+started close together.
 
-After the first account-side limit response, stop retrying and let the cooldown clear. For a
-conservative starting point, set one spawned agent thread at a time in the existing `[agents]`
-section of `~/.codex/config.toml`:
+After the first account-side limit response, avoid manually starting more turns and let the cooldown
+clear. Codex may still repeat a Native request inside its built-in provider; same-turn repeats attach
+to the original execution. To limit user-started agent concurrency, set one spawned agent thread at
+a time in the existing `[agents]` section of `~/.codex/config.toml`:
 
 ```toml
 [agents]
@@ -176,7 +182,7 @@ max_concurrent_threads_per_session = 1
 ```
 
 If the table already exists, add or change only the key; do not create a second `[agents]` table.
-Bigger Context can make one turn larger and longer, but does not increase safe account concurrency.
+Bigger Context can make one turn larger and longer, but does not increase ChatGPT's account limits.
 
 ## Images from earlier turns are attached again
 
@@ -231,8 +237,7 @@ safe log**. A useful report contains:
 - Codex Desktop and/or CLI version;
 - OS and architecture;
 - ChatGPT account tier;
-- Browser-only, Full harness (automatic), or Zero Risk mode and the exact selected model;
-- For Zero Risk, the ChatGPT model/effort and the last completed step: copying, pasting, sending in ChatGPT, confirming Sent, or the first MCP call;
+- Browser-only or Full harness mode and the exact selected model;
 - exact reproduction steps and complete final error;
 - whether it reproduces in a fresh Codex task; and
 - a safe log captured immediately after that reproduction.

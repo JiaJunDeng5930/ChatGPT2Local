@@ -67,15 +67,12 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 
 <a id="modes"></a>
 
-Automatic modes offer Luna/Think when the account has no reasoning selector; otherwise Instant–High, with Extra High and Pro available independently when exposed by the account.
+The model catalog offers Luna/Think when the account has no reasoning selector; otherwise it offers Instant–High, with Extra High and Pro available independently when exposed by the account.
 
 | Mode | Sending messages | Local Codex tools |
 | --- | --- | --- |
 | **Browser-only** | Automatic | No |
-| **Full harness (With Automation)** | Automatic | Yes, through MCP |
-| **Zero Risk** | Paste and send manually | Yes, through a separate MCP connector |
-
-Zero Risk does not read or operate the ChatGPT page. Choose the model and `Codex Zero Risk` connector yourself, paste and send the prepared prompt, then confirm **Sent** in the launcher. Automatic model entries each select a fixed ChatGPT mode; Codex’s Effort and Speed rows do not override it.
+| **Full harness** | Automatic | Yes, through MCP |
 
 <a id="full-harness"></a>
 

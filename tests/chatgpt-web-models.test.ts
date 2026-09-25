@@ -7,10 +7,6 @@ import {
   CHATGPT_WEB_LUNA_MODEL_ROUTE,
   CHATGPT_WEB_LUNA_MODEL_ROUTES,
   CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE,
-  CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
-  CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
-  CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
-  CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
   CHATGPT_WEB_MODEL_ROUTES,
   requireChatGptWebModelRoute,
   resolveChatGptWebContextLimits,
@@ -89,50 +85,6 @@ describe("fixed ChatGPT Web model routes", () => {
       solAvailable: true,
       extraHighAvailable: false, proAvailable: false,
     })).toThrow("only available for Luna-only accounts");
-  });
-
-  test("Zero Risk exposes one generic route independent of account capabilities", () => {
-    const manual = {
-      solAvailable: false,
-      extraHighAvailable: false, proAvailable: false,
-      browserInteractionMode: "manual" as const,
-    };
-    expect(availableChatGptWebModelRoutes(manual)).toEqual([CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE]);
-    expect(requireChatGptWebModelRoute("chatgpt-web/zero-risk", manual))
-      .toBe(CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE);
-    expect(() => requireChatGptWebModelRoute("chatgpt-web/zero-risk-pro", manual))
-      .toThrow("not enabled in Zero Risk model settings");
-    const manualPro = { ...manual, zeroRiskProEnabled: true };
-    expect(availableChatGptWebModelRoutes(manualPro)).toEqual([
-      CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
-      CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
-    ]);
-    expect(requireChatGptWebModelRoute("chatgpt-web/zero-risk-pro", manualPro))
-      .toBe(CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE);
-    expect(() => requireChatGptWebModelRoute("chatgpt-web/luna", manual))
-      .toThrow("not available while Zero Risk is enabled");
-    expect(() => requireChatGptWebModelRoute("chatgpt-web/zero-risk", plus))
-      .toThrow("only available while Zero Risk is enabled");
-  });
-
-  test("Zero Risk uses measured physical model capacity and rejects multipart Bigger Context", () => {
-    const manual = {
-      solAvailable: true,
-      extraHighAvailable: true, proAvailable: true,
-      browserInteractionMode: "manual" as const,
-    };
-    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL, "low", manual)).toEqual({
-      contextWindow: 41_000,
-    });
-    expect(resolveChatGptWebTransportLimits(CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL, "low", manual)).toEqual({});
-    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL, "low", manual)).toEqual({
-      contextWindow: 112_193,
-    });
-    expect(resolveChatGptWebTransportLimits(CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL, "low", manual)).toEqual({});
-    expect(() => availableChatGptWebModelRoutes({
-      ...manual,
-      experimentalBiggerContext: true,
-    })).toThrow("does not support Bigger Context");
   });
 
   test("publishes measured Plus browser context windows and message boundaries", () => {
@@ -228,6 +180,8 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(request.options.reasoning).toBe("max");
     expect(() => routeChatGptWebRequest(parsed("chatgpt-web/not-enabled"), config))
       .toThrow("model is not enabled");
+    expect(() => routeChatGptWebRequest(parsed("chatgpt-web/zero-risk"), config))
+      .toThrow("model is not enabled");
   });
 
   test("keeps Pro compaction on the same retained Pro conversation", () => {
@@ -275,21 +229,4 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(request.options.reasoning).toBe("medium");
   });
 
-  test("Zero Risk routing preserves its internal backend identity and only a technical Codex effort", () => {
-    const config = defaultConfig("full");
-    config.browserInteractionMode = "manual";
-    const request = parsed("chatgpt-web/zero-risk", "ultra");
-    const route = routeChatGptWebRequest(request, config);
-
-    expect(route).toBe(CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE);
-    expect(request.modelId).toBe(CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL);
-    expect(request.options.reasoning).toBe("low");
-
-    config.zeroRiskProEnabled = true;
-    const proRequest = parsed("chatgpt-web/zero-risk-pro", "ultra");
-    const proRoute = routeChatGptWebRequest(proRequest, config);
-    expect(proRoute).toBe(CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE);
-    expect(proRequest.modelId).toBe(CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL);
-    expect(proRequest.options.reasoning).toBe("low");
-  });
 });

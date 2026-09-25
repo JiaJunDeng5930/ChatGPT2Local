@@ -65,15 +65,12 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 
 <a id="modes"></a>
 
-自动模式在账户没有推理选择器时提供 Luna/Think；否则提供 Instant–High，并分别按账户实际可用状态显示 Extra High 和 Pro。
+模型目录会在账户没有推理选择器时提供 Luna/Think；否则提供 Instant–High，并根据账户的实际可用状态显示 Extra High 和 Pro。
 
 | 模式 | 发送消息 | 本地 Codex 工具 |
 | --- | --- | --- |
 | **Browser-only** | 自动 | 不支持 |
-| **Full harness (With Automation)** | 自动 | 支持，通过 MCP |
-| **Zero Risk** | 手动粘贴并发送 | 支持，通过独立 MCP 连接器 |
-
-Zero Risk 不读取或操作 ChatGPT 页面。请自行选择模型和 `Codex Zero Risk` 连接器，粘贴并发送准备好的提示词，再在启动器中确认 **Sent**。自动模式的每个模型条目对应固定的 ChatGPT 模式；Codex 的 Effort 和 Speed 选项不会覆盖它。
+| **Full harness** | 自动 | 支持，通过 MCP |
 
 <a id="full-harness"></a>
 

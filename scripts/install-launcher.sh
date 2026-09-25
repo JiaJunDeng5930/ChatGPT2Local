@@ -33,7 +33,7 @@ case "$OS" in
 esac
 
 if [ -z "$VERSION" ]; then
-  VERSION="$(curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 \
+  VERSION="$(curl -fsSL --connect-timeout 15 --max-time 60 \
     "https://api.github.com/repos/$REPOSITORY/releases/latest" \
     | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' \
     | head -n 1)"
@@ -52,9 +52,9 @@ BASE_URL="https://github.com/$REPOSITORY/releases/download/v$VERSION"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-web-gpt-launcher.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
 
-curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 900 \
+curl -fsSL --connect-timeout 15 --max-time 900 \
   "$BASE_URL/$ASSET" -o "$TEMP_DIR/$ASSET"
-curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 \
+curl -fsSL --connect-timeout 15 --max-time 60 \
   "$BASE_URL/checksums.txt" -o "$TEMP_DIR/checksums.txt"
 EXPECTED="$(awk -v asset="$ASSET" '$2 == asset { print $1 }' "$TEMP_DIR/checksums.txt")"
 if [ "$OS" = "Darwin" ]; then

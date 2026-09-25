@@ -22,7 +22,7 @@ for command in curl meson ninja pkg-config sha256sum tar nm; do
   fi
 done
 
-curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 \
+curl -fsSL --connect-timeout 15 --max-time 300 \
   "$SOURCE_URL" -o "$TEMP_DIR/$ARCHIVE"
 printf '%s  %s\n' "$EXPECTED_SHA256" "$TEMP_DIR/$ARCHIVE" | sha256sum -c - >/dev/null
 tar -xJf "$TEMP_DIR/$ARCHIVE" -C "$TEMP_DIR"

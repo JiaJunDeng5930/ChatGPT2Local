@@ -1,8 +1,8 @@
 const { BrowserTimezone } = require("./browser-timezone.cjs");
 const fs = require("node:fs");
 const path = require("node:path");
-const { createHash, randomBytes } = require("node:crypto");
-const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
+const { randomBytes } = require("node:crypto");
+const { WebContentsView, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
   runBrowserHelperOperation,
@@ -11,11 +11,7 @@ const {
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { validateSessionLoginState } = require("./session-login-state.cjs");
-const {
-  refreshTurnLeasesAfterSuspension,
-  shouldBlockSleepForTurns,
-  sweepGapIndicatesSuspension,
-} = require("./turn-suspension.cjs");
+const { shouldBlockSleepForTurns } = require("./turn-suspension.cjs");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -30,21 +26,8 @@ const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
-const MAX_BROWSER_TABS = 5;
 const MAX_CANCELLED_TURN_TRACES = 256;
-const MANUAL_SUBMIT_TIMEOUT_MS = 30_000;
-const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
-const MAX_MANUAL_TERMINAL_SIGNALS = 256;
-const MAX_MANUAL_PROMPT_CHARS = 1_000_000;
-const INTERACTION_MODE_CHANGE_OPERATION = "browser interaction mode change";
 const HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 800, height: 600 });
-// These are lease/initialization guards only. They do not limit a live ChatGPT turn: active turns
-// stay alive as long as the helper keeps heartbeating. They only reclaim a blank surface or a turn
-// whose helper disappeared without delivering the normal /v1/turn/end event.
-const TURN_HEARTBEAT_SWEEP_MS = 5_000;
-const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
-const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
-const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
 const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
 const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
 const WINDOW_VISIBILITY_EVENTS = ["show", "hide", "minimize", "restore"];
@@ -161,14 +144,6 @@ function navigationErrorForLog(error) {
   return detail;
 }
 
-function isAbortedNavigationError(error) {
-  if (error && typeof error === "object"
-    && (error.code === -3 || error.code === "ERR_ABORTED")) {
-    return true;
-  }
-  return error instanceof Error && /\bERR_ABORTED\b/.test(error.message);
-}
-
 function isTemporaryChatUrl(value) {
   let parsed;
   try {
@@ -206,26 +181,6 @@ function isChatGptCloudflareChallengeResponse(details) {
   return details?.statusCode === 403
     && isChatGptBackendUrl(details.url)
     && responseHeaderIncludes(details.responseHeaders, "cf-mitigated", "challenge");
-}
-
-function manualPromptDigest(prompt) {
-  return createHash("sha256").update(prompt, "utf8").digest("hex");
-}
-
-function browserInteractionModeFor(host) {
-  const mode = host.interactionModeOverride ?? host.getBrowserInteractionMode?.() ?? "automatic";
-  if (mode !== "automatic" && mode !== "manual") {
-    throw new Error("Launcher browser interaction mode is invalid");
-  }
-  return mode;
-}
-
-function requireAutomaticBrowserInspection(host, operation) {
-  if (browserInteractionModeFor(host) === "manual") {
-    const error = new Error(`${operation} is disabled in Zero Risk mode`);
-    error.code = "manual_browser_inspection_disabled";
-    throw error;
-  }
 }
 
 class BrowserTurnCancelledError extends Error {
@@ -316,8 +271,6 @@ class BrowserHost {
     profile = "production",
     publishState,
     showWindow = () => {},
-    clipboardApi = clipboard,
-    getBrowserInteractionMode = () => "automatic",
     browserTimezone = "",
   }) {
     if (typeof getConnectorName !== "function") {
@@ -346,8 +299,6 @@ class BrowserHost {
     this.profile = profile;
     this.publishState = publishState;
     this.showWindow = showWindow;
-    this.clipboard = clipboardApi;
-    this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.browserTimezone = new BrowserTimezone(browserTimezone, logger);
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
@@ -357,9 +308,6 @@ class BrowserHost {
     this.turnTabs = new Map();
     this.closedTurnOwners = new Map();
     this.userCancelledTurnOwners = new Map();
-    this.manualTerminalSignals = new Map();
-    this.manualCompletionSignals = new Map();
-    this.interactionModeOverride = null;
     this.selectedTabId = "home";
     this.manualOperation = null;
     this.loginOperation = null;
@@ -373,16 +321,7 @@ class BrowserHost {
     this.authView = null;
     this.authNavigationError = null;
     this.homeNavigationTimeout = null;
-    this.lastTurnSweepAt = Date.now();
     this.powerSaveBlockerId = null;
-    this.turnLeaseSweep = setInterval(() => { void this.reapExpiredTurnTabs(); }, TURN_HEARTBEAT_SWEEP_MS);
-    this.turnLeaseSweep.unref?.();
-    this.resumeListener = () => this.refreshTurnLeases("system_resume");
-    if (powerMonitor && typeof powerMonitor.on === "function") {
-      powerMonitor.on("resume", this.resumeListener);
-    } else {
-      this.resumeListener = null;
-    }
     this.boundsReady = false;
     this.bounds = { x: 0, y: 0, width: 1, height: 1 };
     this.state = {
@@ -439,7 +378,7 @@ class BrowserHost {
       await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL);
       // CDP emulation needs a live renderer; initialize the owned blank page first.
       await this.browserTimezone.attach(this.view.webContents);
-      if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
+      await this.markOwnedSurface();
     } finally {
       this.syncViewVisibility();
     }
@@ -451,60 +390,19 @@ class BrowserHost {
     return this.manualOperation || (this.loginOperation ? "ChatGPT login" : null);
   }
 
-  assertTurnTabsCanResetForInteractionModeChange() {
-    if ([...this.turnTabs.values()].some(tab => tab.status === "running")) {
-      throw new Error("Finish or cancel active ChatGPT turns before changing browser interaction mode");
-    }
-  }
-
-  async withInteractionModeChange(mode, action) {
-    if (mode !== "automatic" && mode !== "manual") {
-      throw new Error("Browser interaction mode must be automatic or manual");
-    }
-    if (this.manualOperation) {
-      throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
-    }
-    this.assertTurnTabsCanResetForInteractionModeChange();
-    this.interactionModeOverride = mode;
-    this.manualOperation = INTERACTION_MODE_CHANGE_OPERATION;
-    let succeeded = false;
-    try {
-      // Setup inspects the primary surface before committing runtime changes. Publish
-      // its native target in the same mode as that inspection, including Zero Risk's exclusion.
-      this.writeDescriptor();
-      let browserCommitted = false;
-      const commitBrowserChange = async () => {
-        if (browserCommitted) throw new Error("Browser interaction mode change was committed more than once");
-        // The runtime setup invokes this callback inside its own rollback boundary. Existing tabs
-        // are mode-bound and remain valid history, so the browser commit has no irreversible tab
-        // mutation that could survive a runtime rollback.
-        if (mode === "automatic") await this.markOwnedSurface();
-        browserCommitted = true;
-      };
-      const result = await action(commitBrowserChange);
-      if (!browserCommitted) {
-        throw new Error("Runtime setup returned before committing the browser interaction mode");
-      }
-      succeeded = true;
-      return result;
-    } finally {
-      this.manualOperation = null;
-      this.interactionModeOverride = null;
-      // main persists the target mode after success; a failed setup keeps the old mode.
-      if (!succeeded) this.writeDescriptor();
-    }
-  }
-
-  browserInteractionMode() {
-    return browserInteractionModeFor(this);
-  }
-
-  requireAutomaticBrowserInspection(operation) {
-    requireAutomaticBrowserInspection(this, operation);
-  }
-
   get activeTraceId() {
-    return [...this.turnTabs.values()].find((tab) => tab.status === "running")?.traceId || null;
+    return [...this.turnTabs.values()].find((tab) => this.isTurnActive(tab))?.traceId || null;
+  }
+
+  isTurnActive(tab) {
+    return tab?.executionActive ?? tab?.status === "running";
+  }
+
+  nextTurnTabOrdinal() {
+    const used = new Set([...this.turnTabs.values()].map(tab => tab.ordinal));
+    let ordinal = 1;
+    while (used.has(ordinal)) ordinal += 1;
+    return ordinal;
   }
 
   tabSnapshot(tab) {
@@ -517,15 +415,6 @@ class BrowserHost {
       active: this.selectedTabId === tab.id,
       closable: true,
     };
-    if (tab.interactionMode === "manual") {
-      Object.assign(snapshot, {
-        interactionMode: "manual",
-        manualState: tab.manualState,
-        ...(tab.manualDeadlineAt ? { manualDeadlineAt: new Date(tab.manualDeadlineAt).toISOString() } : {}),
-        canCopyPrompt: typeof tab.prompt === "string" && tab.prompt.length > 0,
-        canConfirmSent: tab.manualState === "awaiting-user",
-      });
-    }
     return snapshot;
   }
 
@@ -534,17 +423,9 @@ class BrowserHost {
   }
 
   async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity) {
-    if (this.turnTabs.size >= MAX_BROWSER_TABS
-      && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
-      throw new Error(
-        `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
-      );
-    }
     const id = randomBytes(12).toString("base64url");
     const surfaceId = randomBytes(24).toString("base64url");
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
-      .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
-    if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
+    const ordinal = this.nextTurnTabOrdinal();
     const view = new WebContentsView({
       webPreferences: {
         partition: this.partition,
@@ -566,19 +447,19 @@ class BrowserHost {
       helperPid,
       view,
       status: "running",
+      executionActive: true,
+      resumeEligible: false,
+      surfaceError: false,
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
       url: IDLE_BROWSER_URL,
       loading: true,
       message: "ChatGPT is working",
-      interactionMode: "automatic",
       initializingSurface: true,
-      bootstrapReady: false,
       rendererReady: false,
       deviceEmulationViewport: null,
       deviceEmulationDirty: true,
-      bootstrapDeadlineAt: Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS,
       lastHeartbeatAt: Date.now(),
     };
     this.turnTabs.set(id, tab);
@@ -600,135 +481,16 @@ class BrowserHost {
         traceId: tab.traceId,
         message,
       });
-      this.removeTurnTab(tab, true);
+      tab.status = "error";
+      tab.executionActive = false;
+      tab.surfaceError = true;
+      tab.message = message;
+      tab.loading = false;
+      this.syncPowerSaveBlocker();
+      this.publishState?.(this.snapshot());
       throw error;
     }
     return tab;
-  }
-
-  createManualTurnTab(traceId, helperPid, conversationKey, prompt, manualSubmitTimeoutMs) {
-    if (this.turnTabs.size >= MAX_BROWSER_TABS
-      && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
-      throw new Error(
-        `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
-      );
-    }
-    const id = randomBytes(12).toString("base64url");
-    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
-      .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
-    if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
-    const view = new WebContentsView({
-      webPreferences: {
-        partition: this.partition,
-        preload: path.join(__dirname, "chatgpt-rate-limit-preload.cjs"),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        spellcheck: true,
-        backgroundThrottling: false,
-      },
-    });
-    const tab = {
-      id,
-      surfaceId: null,
-      traceId,
-      conversationKey,
-      connectorIdentity: null,
-      connectorBound: false,
-      helperPid,
-      view,
-      status: "running",
-      ordinal,
-      label: `ChatGPT ${ordinal}`,
-      pageTitle: "ChatGPT",
-      url: TEMPORARY_CHAT_URL,
-      loading: true,
-      message: "Paste the copied prompt, add any images yourself because Zero Risk cannot transfer them, choose a model and effort, then press Sent",
-      interactionMode: "manual",
-      manualState: "awaiting-user",
-      manualSubmitTimeoutMs,
-      manualDeadlineAt: Date.now() + manualSubmitTimeoutMs,
-      manualDeadlineTimer: null,
-      manualWaiters: new Set(),
-      manualTerminalWaiters: new Set(),
-      manualTerminalResolutionSuppressed: false,
-      prompt,
-      promptDigest: manualPromptDigest(prompt),
-      manualConversationReused: false,
-      sentAt: null,
-      bootstrapReady: false,
-      rendererReady: false,
-      lastHeartbeatAt: Date.now(),
-    };
-    this.turnTabs.set(id, tab);
-    this.window.contentView.addChildView(view);
-    this.presentTurnView(tab, true);
-    view.webContents.setZoomFactor(this.state.zoomFactor);
-    this.bindShellZoomShortcuts(view.webContents);
-    this.bindManualTurnContents(tab);
-    void this.initializeManualTurnTab(tab);
-    return tab;
-  }
-
-  async initializeManualTurnTab(tab) {
-    const contents = tab.view.webContents;
-    try {
-      await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL);
-      await this.browserTimezone.attach(contents);
-    } catch (error) {
-      if (this.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
-      this.logger.error("browser.manual_tab_initialization_failed", {
-        tabId: tab.id,
-        traceId: tab.traceId,
-        ...navigationErrorForLog(error),
-      });
-      this.signalManualTerminal(tab, "failed");
-      this.removeTurnTab(tab, true);
-      return;
-    }
-    if (this.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
-    try {
-      await contents.loadURL(TEMPORARY_CHAT_URL);
-    } catch (error) {
-      if (this.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
-      if (isAbortedNavigationError(error)) {
-        this.logger.info("browser.manual_tab_navigation_superseded", {
-          tabId: tab.id,
-          traceId: tab.traceId,
-          ...navigationErrorForLog(error),
-        });
-        return;
-      }
-      this.logger.error("browser.manual_tab_navigation_failed", {
-        tabId: tab.id,
-        traceId: tab.traceId,
-        ...navigationErrorForLog(error),
-      });
-      this.signalManualTerminal(tab, "failed");
-      this.removeTurnTab(tab, true);
-    }
-  }
-
-  evictOldestRetainedTurnTab() {
-    const retained = [...this.turnTabs.values()]
-      .filter(tab => tab.status === "ready")
-      .sort((left, right) => (left.lastHeartbeatAt ?? 0) - (right.lastHeartbeatAt ?? 0))[0];
-    if (!retained) return false;
-    this.removeTurnTab(retained, false);
-    return true;
-  }
-
-  evictOldestReclaimableTurnTab() {
-    const terminalManual = [...this.turnTabs.values()]
-      .filter(tab => tab.interactionMode === "manual"
-        && tab.status === "error"
-        && ["timed-out", "failed", "cancelled"].includes(tab.manualState))
-      .sort((left, right) => (left.lastHeartbeatAt ?? 0) - (right.lastHeartbeatAt ?? 0))[0];
-    if (terminalManual) {
-      this.removeTurnTab(terminalManual, false);
-      return true;
-    }
-    return BrowserHost.prototype.evictOldestRetainedTurnTab.call(this);
   }
 
   zoomShell(action) {
@@ -808,12 +570,7 @@ class BrowserHost {
       tab.url = contents.getURL();
       tab.loading = false;
       tab.rendererReady = true;
-      if (tab.url.startsWith(CHATGPT_ORIGIN)) tab.bootstrapReady = true;
       this.syncViewVisibility();
-      if (browserInteractionModeFor(this) !== "automatic") {
-        this.publishState?.(this.snapshot());
-        return;
-      }
       if (tab.initializingSurface) {
         this.publishState?.(this.snapshot());
         return;
@@ -822,6 +579,7 @@ class BrowserHost {
         () => this.publishState?.(this.snapshot()),
         (error) => {
           tab.status = "error";
+          tab.surfaceError = true;
           tab.message = `Browser ownership failed: ${error instanceof Error ? error.message : String(error)}`;
           this.syncPowerSaveBlocker();
           this.publishState?.(this.snapshot());
@@ -829,7 +587,6 @@ class BrowserHost {
       );
     });
     contents.on("page-title-updated", (_event, title) => {
-      if (browserInteractionModeFor(this) !== "automatic") return;
       if (typeof title === "string" && title.trim()) tab.pageTitle = title.trim();
       this.publishState?.(this.snapshot());
     });
@@ -848,7 +605,11 @@ class BrowserHost {
         errorDescription,
         url,
       });
-      this.removeTurnTab(tab, true);
+      tab.status = "error";
+      tab.surfaceError = true;
+      tab.message = errorDescription;
+      this.syncPowerSaveBlocker();
+      this.publishState?.(this.snapshot());
     });
     contents.on("render-process-gone", (_event, details) => {
       tab.message = `Browser renderer stopped: ${details.reason}`;
@@ -858,7 +619,16 @@ class BrowserHost {
         reason: details.reason,
         exitCode: details.exitCode,
       });
-      this.removeTurnTab(tab, true);
+      tab.status = "error";
+      tab.surfaceError = true;
+      this.syncPowerSaveBlocker();
+      this.publishState?.(this.snapshot());
+    });
+    contents.once("destroyed", () => {
+      if (this.destroying) return;
+      if (this.turnTabs.get(tab.id) !== tab) return;
+      tab.executionActive = false;
+      this.removeTurnTab(tab, false);
     });
     contents.on("unresponsive", () => {
       this.logger.warn("browser.tab_unresponsive", { tabId: tab.id, traceId: tab.traceId });
@@ -869,7 +639,6 @@ class BrowserHost {
   }
 
   async markTurnTabSurface(tab) {
-    requireAutomaticBrowserInspection(this, "ChatGPT turn surface ownership marking");
     const contents = tab?.view?.webContents;
     if (!contents || contents.isDestroyed()) {
       throw new Error("ChatGPT turn browser closed before ownership was established");
@@ -882,96 +651,6 @@ class BrowserHost {
       });
       document.documentElement.dataset.codexWebGptSurface = ${encoded};
     })()`, true);
-  }
-
-  bindManualTurnContents(tab) {
-    const contents = tab.view.webContents;
-    const invalidateConversation = (url, inPlace) => {
-      // History state updates and anchor scrolling keep the same document/context.
-      if (inPlace && url.split("#", 1)[0] === tab.url?.split("#", 1)[0]) return;
-      // Initial login/navigation still carries full context. A later document change
-      // cannot prove that an incremental continuation belongs to the same conversation.
-      if (!tab.conversationKey
-        || (!tab.manualConversationReused && tab.manualState === "awaiting-user")) return;
-      tab.conversationKey = undefined;
-      if (tab.manualConversationReused && tab.status === "running") {
-        tab.status = "error";
-        tab.message = "ChatGPT page changed during a resumed Zero Risk turn. Start a new Codex turn to resend the full context.";
-        this.signalManualTerminal(tab, "failed");
-      }
-      this.logger.info("browser.manual_conversation_invalidated", {
-        tabId: tab.id,
-        traceId: tab.traceId,
-      });
-    };
-    contents.setWindowOpenHandler(({ url }) => {
-      let parsed;
-      try { parsed = new URL(url); } catch { return { action: "deny" }; }
-      if (parsed.protocol === "https:" || parsed.protocol === "http:") {
-        void shell.openExternal(parsed.toString()).catch((error) => {
-          this.logger.warn("browser.manual_external_url_failed", {
-            origin: parsed.origin,
-            errorType: error?.name || "Error",
-          });
-        });
-      }
-      return { action: "deny" };
-    });
-    contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
-      if (!mainFrame) return;
-      invalidateConversation(url, inPlace);
-      tab.url = url;
-      tab.loading = true;
-      this.publishState?.(this.snapshot());
-    });
-    contents.on("did-start-loading", () => {
-      tab.loading = true;
-      this.publishState?.(this.snapshot());
-    });
-    contents.on("did-stop-loading", () => {
-      tab.loading = false;
-      tab.url = contents.getURL();
-      this.publishState?.(this.snapshot());
-    });
-    contents.on("did-finish-load", () => {
-      tab.url = contents.getURL();
-      tab.loading = false;
-      tab.rendererReady = true;
-      tab.bootstrapReady = tab.url.startsWith(CHATGPT_ORIGIN);
-      this.syncViewVisibility();
-      this.publishState?.(this.snapshot());
-    });
-    contents.on("did-navigate-in-page", (_event, url, mainFrame) => {
-      if (mainFrame) {
-        invalidateConversation(url, true);
-        tab.url = url;
-      }
-      this.publishState?.(this.snapshot());
-    });
-    contents.on("did-fail-load", (_event, errorCode, errorDescription, url, mainFrame) => {
-      if (!mainFrame || errorCode === -3) return;
-      tab.url = url;
-      tab.message = errorDescription;
-      this.logger.error("browser.manual_tab_navigation_failed", {
-        tabId: tab.id,
-        traceId: tab.traceId,
-        errorCode,
-        origin: navigationOriginForLog(url),
-      });
-      this.signalManualTerminal(tab, "failed");
-      this.removeTurnTab(tab, true);
-    });
-    contents.on("render-process-gone", (_event, details) => {
-      tab.message = `Browser renderer stopped: ${details.reason}`;
-      this.logger.error("browser.manual_tab_renderer_gone", {
-        tabId: tab.id,
-        traceId: tab.traceId,
-        reason: details.reason,
-        exitCode: details.exitCode,
-      });
-      this.signalManualTerminal(tab, "failed");
-      this.removeTurnTab(tab, true);
-    });
   }
 
   bindWebContents() {
@@ -1022,10 +701,6 @@ class BrowserHost {
         });
       }
       const url = contents.getURL();
-      if (browserInteractionModeFor(this) === "manual") {
-        this.setState({ status: "idle", message: "No active task", url, loading: false });
-        return;
-      }
       this.setState({ url, loading: false });
       void this.applyViewportCss();
       void this.markOwnedSurface()
@@ -1040,22 +715,9 @@ class BrowserHost {
     contents.on("did-start-loading", () => this.setState({ loading: true }));
     contents.on("did-stop-loading", () => {
       this.clearHomeNavigationTimeout();
-      if (browserInteractionModeFor(this) === "manual"
-        && this.state.status === "loading"
-        && !this.activeTraceId
-        && !this.manualOperation) {
-        this.setState({
-          status: "idle",
-          message: "No active task",
-          url: contents.getURL(),
-          loading: false,
-        });
-        return;
-      }
       this.setState({ loading: false });
     });
     contents.on("page-title-updated", (_event, title) => {
-      if (browserInteractionModeFor(this) === "manual") return;
       this.setState({ title: typeof title === "string" && title.trim() ? title.trim() : "ChatGPT" });
     });
     contents.on("did-navigate-in-page", (_event, url, mainFrame) => {
@@ -1178,9 +840,7 @@ class BrowserHost {
   bindChatGptBackendRecovery() {
     this.view.webContents.session.webRequest.onCompleted(
       CHATGPT_BACKEND_REQUEST_FILTER,
-      details => browserInteractionModeFor(this) === "automatic"
-        ? this.handleChatGptBackendResponse(details)
-        : undefined,
+      details => this.handleChatGptBackendResponse(details),
     );
   }
 
@@ -1253,11 +913,10 @@ class BrowserHost {
   snapshot() {
     const contents = this.activeView()?.webContents;
     const selected = this.selectedTurnTab();
-    const manualInteraction = browserInteractionModeFor(this) === "manual";
     const homeTab = {
       id: "home",
       traceId: null,
-      title: manualInteraction ? "ChatGPT" : this.state.title || "ChatGPT",
+      title: this.state.title || "ChatGPT",
       status: this.state.status,
       loading: this.state.loading === true,
       active: this.selectedTabId === "home",
@@ -1269,19 +928,15 @@ class BrowserHost {
           status: selected.status,
           message: selected.message,
           url: selected.url,
-          title: selected.interactionMode === "manual" ? selected.label : selected.pageTitle,
+          title: selected.pageTitle,
           loading: selected.loading,
         }
-      : manualInteraction
-        ? { ...this.state, title: "ChatGPT" }
-        : this.state;
+      : this.state;
     return {
       ...readBrowserNavigationState(contents, {
         ...state,
         visible: this.visible,
         surfaceActive: this.surfaceActive,
-      }, {
-        readPageTitle: !manualInteraction,
       }),
       activeTabId: this.selectedTabId,
       tabs: this.turnTabs.size > 0
@@ -1290,7 +945,6 @@ class BrowserHost {
             ...[...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab)),
           ]
         : [homeTab],
-      maxTabs: MAX_BROWSER_TABS,
     };
   }
 
@@ -1315,7 +969,7 @@ class BrowserHost {
     if (tab.helperPid !== helperPid) {
       throw new Error(`Browser helper ownership mismatch: expected ${tab.helperPid}, received ${helperPid}`);
     }
-    if (tab.status !== "running") throw new Error(`Browser turn ${traceId} is no longer running`);
+    if (!this.isTurnActive(tab)) throw new Error(`Browser turn ${traceId} is no longer running`);
     tab.lastHeartbeatAt = Date.now();
     if (refreshViewport) {
       // Closing an external Playwright CDP session can clear Chromium's effective emulation while
@@ -1327,22 +981,13 @@ class BrowserHost {
     return this.snapshot();
   }
 
-  refreshTurnLeases(reason, now = Date.now()) {
-    const refreshed = refreshTurnLeasesAfterSuspension(
-      [...this.turnTabs.values()],
-      now,
-      TURN_TAB_BOOTSTRAP_TIMEOUT_MS,
-    );
-    if (refreshed.length > 0) {
-      this.logger.warn("browser.turn_leases_refreshed_after_suspension", { reason, traceIds: refreshed });
-    }
-  }
-
   syncPowerSaveBlocker() {
     // Under plain Node (the launcher test harness) require("electron") exposes no APIs; the
     // blocker is an Electron-only concern and its absence must not break lease bookkeeping.
     if (!powerSaveBlocker || typeof powerSaveBlocker.start !== "function") return;
-    const wanted = shouldBlockSleepForTurns([...this.turnTabs.values()]);
+    const wanted = shouldBlockSleepForTurns([...this.turnTabs.values()].map(tab => (
+      this.isTurnActive(tab) ? { ...tab, status: "running" } : tab
+    )));
     const active = this.powerSaveBlockerId !== null && powerSaveBlocker.isStarted(this.powerSaveBlockerId);
     if (wanted && !active) {
       this.powerSaveBlockerId = powerSaveBlocker.start("prevent-app-suspension");
@@ -1354,89 +999,6 @@ class BrowserHost {
     }
   }
 
-  reapExpiredTurnTabs(now = Date.now()) {
-    const cancellations = [];
-    const lastSweepAt = this.lastTurnSweepAt;
-    this.lastTurnSweepAt = now;
-    if (sweepGapIndicatesSuspension(lastSweepAt, now, TURN_HEARTBEAT_SWEEP_MS)) {
-      // The launcher itself was frozen, so missing heartbeats prove suspension rather than a dead
-      // helper. Re-baseline every active lease before ordinary reaping resumes.
-      this.refreshTurnLeases("sweep_gap", now);
-      return;
-    }
-    for (const tab of [...this.turnTabs.values()]) {
-      if (tab.interactionMode === "manual") {
-        if (tab.status === "ready") {
-          if (now - (tab.lastHeartbeatAt ?? 0) < RETAINED_TURN_TAB_TTL_MS) continue;
-          this.logger.info("browser.retained_tab_expired", { tabId: tab.id, traceId: tab.traceId });
-          this.removeTurnTab(tab, false);
-          continue;
-        }
-        if (tab.status === "running" && !processRunning(tab.helperPid)) {
-          this.logger.warn("browser.manual_orphan_turn_reaped", {
-            tabId: tab.id,
-            traceId: tab.traceId,
-            helperPid: tab.helperPid,
-            evidence: "owner_process_exited",
-          });
-          this.signalManualTerminal(tab, "failed");
-          this.removeTurnTab(tab, true);
-        }
-        continue;
-      }
-      if (tab.status === "ready") {
-        if (now - (tab.lastHeartbeatAt ?? 0) < RETAINED_TURN_TAB_TTL_MS) continue;
-        this.logger.info("browser.retained_tab_expired", { tabId: tab.id, traceId: tab.traceId });
-        this.removeTurnTab(tab, false);
-        continue;
-      }
-      if (tab.status !== "running") continue;
-      const bootstrapExpired = tab.bootstrapReady !== true
-        && now >= (tab.bootstrapDeadlineAt ?? Number.POSITIVE_INFINITY);
-      const heartbeatExpired = tab.bootstrapReady === true
-        && now - (tab.lastHeartbeatAt ?? 0) >= TURN_HEARTBEAT_TIMEOUT_MS;
-      if (!bootstrapExpired && !heartbeatExpired) continue;
-      if (tab.expiryCancellation) {
-        cancellations.push(tab.expiryCancellation);
-        continue;
-      }
-      const evidence = bootstrapExpired ? "browser_surface_bootstrap_timeout" : "helper_heartbeat_expired";
-      const expiredOwner = {
-        tabId: tab.id,
-        traceId: tab.traceId,
-        helperPid: tab.helperPid,
-        evidence,
-      };
-      this.logger.warn("browser.orphan_turn_expired", expiredOwner);
-      if (!this.cancelTurn) {
-        this.removeTurnTab(tab, true);
-        this.logger.warn("browser.orphan_turn_reaped", expiredOwner);
-        continue;
-      }
-      // Release runtime ownership before destroying its document, just as for an explicit close.
-      // Coalesce overlapping sweeps; a failed control request leaves the lease available for cleanup.
-      const { traceId, helperPid } = tab;
-      tab.expiryCancellation = Promise.resolve().then(async () => {
-        try {
-          await this.cancelTurn(traceId, evidence);
-          if (this.turnTabs.get(tab.id) === tab && tab.traceId === traceId
-            && tab.helperPid === helperPid && tab.status === "running") {
-            this.removeTurnTab(tab, true);
-          }
-          this.logger.warn("browser.orphan_turn_reaped", expiredOwner);
-        } catch (error) {
-          this.logger.warn("browser.orphan_turn_cancel_failed", {
-            tabId: tab.id, traceId, evidence, errorType: error?.name || "Error",
-          });
-        } finally {
-          delete tab.expiryCancellation;
-        }
-      });
-      cancellations.push(tab.expiryCancellation);
-    }
-    return Promise.all(cancellations);
-  }
-
   setBounds(bounds, rendererZoomFactor = 1) {
     const [width, height] = this.window.getContentSize();
     this.bounds = constrainBrowserBounds(
@@ -1446,11 +1008,9 @@ class BrowserHost {
     this.boundsReady = true;
     this.authView?.setBounds(this.bounds);
     this.syncViewVisibility();
-    if (browserInteractionModeFor(this) === "automatic") {
-      void this.view.webContents.executeJavaScript("window.dispatchEvent(new Event('resize'))", true).catch(() => {});
-      if (this.authView && !this.authView.webContents.isDestroyed()) {
-        void this.authView.webContents.executeJavaScript("window.dispatchEvent(new Event('resize'))", true).catch(() => {});
-      }
+    void this.view.webContents.executeJavaScript("window.dispatchEvent(new Event('resize'))", true).catch(() => {});
+    if (this.authView && !this.authView.webContents.isDestroyed()) {
+      void this.authView.webContents.executeJavaScript("window.dispatchEvent(new Event('resize'))", true).catch(() => {});
     }
   }
 
@@ -1485,11 +1045,6 @@ class BrowserHost {
   }
 
   presentTurnView(tab, visible) {
-    if (tab.interactionMode === "manual") {
-      tab.view.setBounds(visible ? this.bounds : this.hiddenTurnBounds());
-      tab.view.setVisible(visible || tab.status === "running");
-      return;
-    }
     if (visible) {
       // Establish native on-screen bounds before removing the background viewport contract.
       tab.view.setBounds(this.bounds);
@@ -1513,7 +1068,7 @@ class BrowserHost {
       }
       tab.view.setBounds(bounds);
     }
-    tab.view.setVisible(visible || tab.status === "running");
+    tab.view.setVisible(visible || this.isTurnActive(tab));
   }
 
   presentPrimaryView(visible) {
@@ -1560,22 +1115,10 @@ class BrowserHost {
   removeTurnTab(tab, abortRunning) {
     if (!this.turnTabs.has(tab.id)) return;
     this.turnTabs.delete(tab.id);
-    if (tab.interactionMode === "manual") {
-      if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
-      tab.manualDeadlineTimer = null;
-      tab.manualDeadlineAt = null;
-      tab.prompt = null;
-      tab.promptDigest = null;
-      for (const resolve of tab.manualWaiters || []) resolve({ status: "cancelled" });
-      tab.manualWaiters?.clear();
-      if (!tab.manualTerminalResolutionSuppressed) {
-        for (const resolve of tab.manualTerminalWaiters || []) resolve({ status: "cancelled" });
-      }
-      tab.manualTerminalWaiters?.clear();
-    }
     this.syncPowerSaveBlocker();
-    if (abortRunning && tab.status === "running") {
+    if (abortRunning && this.isTurnActive(tab)) {
       this.closedTurnOwners.set(tab.traceId, tab.helperPid);
+      tab.executionActive = false;
       tab.status = "aborted";
     }
     try { this.window.contentView.removeChildView(tab.view); } catch {}
@@ -1611,33 +1154,12 @@ class BrowserHost {
   async closeTab(tabId) {
     const tab = this.turnTabs.get(tabId);
     if (!tab) throw new Error("Browser tab does not exist");
-    const running = tab.status === "running";
-    if (tab.interactionMode === "manual") {
-      this.signalManualTerminal(tab, "cancelled");
-      if (running && this.cancelTurn) {
-        try {
-          await this.cancelTurn(tab.traceId);
-        } catch (error) {
-          this.logger.warn("browser.manual_turn_cancel_failed", {
-            tabId: tab.id,
-            traceId: tab.traceId,
-            errorType: error?.name || "Error",
-          });
-        }
-      }
-      if (this.turnTabs.get(tabId) === tab) this.removeTurnTab(tab, true);
-      this.logger.info("browser.tab_closed", { tabId, traceId: tab.traceId, status: tab.status });
-      return this.snapshot();
-    }
+    const running = this.isTurnActive(tab);
     if (running) {
       this.rememberUserCancelledTurn(tab.traceId, tab.helperPid);
-      // A running tab is the browser document for one exact Codex turn. Keep that document alive
-      // until the runtime acknowledges cancellation; otherwise a failed control request would
-      // destroy the only DOM source while leaving an orphaned Codex turn running.
-      if (this.cancelTurn) await this.cancelTurn(tab.traceId);
     }
-    // The helper can deliver /v1/turn/end while targeted cancellation is in flight. In that case
-    // endTurn already released this exact tab and there is nothing left to destroy here.
+    // Revoke the runtime capability for this trace before explicit close removes the page.
+    if (tab.traceId && this.cancelTurn) await this.cancelTurn(tab.traceId);
     if (this.turnTabs.get(tabId) === tab) this.removeTurnTab(tab, true);
     this.logger.info("browser.tab_closed", { tabId, traceId: tab.traceId, status: tab.status });
     return this.snapshot();
@@ -1708,10 +1230,9 @@ class BrowserHost {
         origin: navigationOriginForLog(contents.getURL()),
       });
       this.setState({ url: contents.getURL(), loading: false });
-      if (browserInteractionModeFor(this) === "automatic") void this.probeAuthentication();
+      void this.probeAuthentication();
     });
     contents.on("page-title-updated", (_event, title) => {
-      if (browserInteractionModeFor(this) === "manual") return;
       this.setState({ title: typeof title === "string" && title.trim() ? title.trim() : "ChatGPT" });
     });
     contents.on("close", () => this.closeAuthView(authView, true));
@@ -1795,7 +1316,6 @@ class BrowserHost {
   }
 
   async applyViewportCss() {
-    requireAutomaticBrowserInspection(this, "ChatGPT viewport CSS injection");
     const contents = this.view?.webContents;
     if (!contents || contents.isDestroyed()) return;
     if (this.viewportCssKey) {
@@ -1806,7 +1326,6 @@ class BrowserHost {
   }
 
   async markOwnedSurface() {
-    requireAutomaticBrowserInspection(this, "ChatGPT DOM surface ownership marking");
     const surfaceId = JSON.stringify(this.surfaceId);
     await this.view.webContents.executeJavaScript(`(() => {
       Object.defineProperty(globalThis, "__CODEX_WEB_GPT_SURFACE_ID__", {
@@ -1826,12 +1345,11 @@ class BrowserHost {
     if (this.surfaceActive && this.boundsReady) this.activeView().webContents.focus();
   }
 
-  async reveal(inspectSession = true) {
-    if (inspectSession) requireAutomaticBrowserInspection(this, "ChatGPT session inspection");
+  async reveal() {
     this.show();
     if (!this.selectedTurnTab() && this.view.webContents.getURL() === IDLE_BROWSER_URL) {
       await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
-      if (inspectSession) await this.probeAuthentication();
+      await this.probeAuthentication();
     }
     return this.snapshot();
   }
@@ -1893,371 +1411,6 @@ class BrowserHost {
     return this.snapshot();
   }
 
-  rememberManualTerminal(traceId, helperPid, status) {
-    this.manualTerminalSignals.delete(traceId);
-    this.manualTerminalSignals.set(traceId, { helperPid, status });
-    while (this.manualTerminalSignals.size > MAX_MANUAL_TERMINAL_SIGNALS) {
-      const oldest = this.manualTerminalSignals.keys().next();
-      if (oldest.done) break;
-      this.manualTerminalSignals.delete(oldest.value);
-    }
-  }
-
-  rememberManualCompletion(traceId, helperPid) {
-    this.manualCompletionSignals.delete(traceId);
-    this.manualCompletionSignals.set(traceId, { helperPid });
-    while (this.manualCompletionSignals.size > MAX_MANUAL_TERMINAL_SIGNALS) {
-      const oldest = this.manualCompletionSignals.keys().next();
-      if (oldest.done) break;
-      this.manualCompletionSignals.delete(oldest.value);
-    }
-  }
-
-  signalManualTerminal(tab, status) {
-    if (tab.interactionMode !== "manual") return;
-    if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
-    tab.manualDeadlineTimer = null;
-    tab.manualDeadlineAt = null;
-    tab.manualState = status === "timeout" ? "timed-out" : status;
-    tab.lastHeartbeatAt = Date.now();
-    tab.prompt = null;
-    tab.promptDigest = null;
-    this.rememberManualTerminal(tab.traceId, tab.helperPid, status);
-    for (const resolve of tab.manualWaiters || []) resolve({ status });
-    tab.manualWaiters?.clear();
-    for (const resolve of tab.manualTerminalWaiters || []) resolve({ status });
-    tab.manualTerminalWaiters?.clear();
-  }
-
-  armManualTurnDeadline(tab) {
-    if (tab.interactionMode !== "manual"
-      || tab.manualState !== "awaiting-user"
-      || !tab.manualDeadlineAt) return;
-    if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
-    const delay = Math.max(0, tab.manualDeadlineAt - Date.now());
-    tab.manualDeadlineTimer = setTimeout(() => {
-      if (this.turnTabs.get(tab.id) !== tab
-        || tab.manualState !== "awaiting-user") return;
-      const timeoutSeconds = Math.round(tab.manualSubmitTimeoutMs / 1_000);
-      tab.status = "error";
-      tab.message = `Prompt submission was not confirmed within ${timeoutSeconds} seconds`;
-      this.signalManualTerminal(tab, "timeout");
-      this.publishState?.(this.snapshot());
-      this.logger.warn("browser.manual_turn_timed_out", {
-        tabId: tab.id,
-        traceId: tab.traceId,
-        phase: "sent-confirmation",
-      });
-    }, delay);
-    tab.manualDeadlineTimer.unref?.();
-  }
-
-  writeManualPrompt(prompt) {
-    if (!this.clipboard || typeof this.clipboard.writeText !== "function") {
-      throw new Error("Electron clipboard is unavailable");
-    }
-    this.clipboard.writeText(prompt);
-  }
-
-  beginManualTurn(traceId, helperPid, prompt, conversationKey, resumePrompt, compaction = false) {
-    if (this.manualOperation) {
-      throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
-    }
-    if (typeof prompt !== "string" || prompt.length < 1 || prompt.length > MAX_MANUAL_PROMPT_CHARS) {
-      throw new Error(`Manual prompt must contain between 1 and ${MAX_MANUAL_PROMPT_CHARS} characters`);
-    }
-    if (resumePrompt !== undefined
-      && (typeof resumePrompt !== "string"
-        || resumePrompt.length < 1
-        || resumePrompt.length > MAX_MANUAL_PROMPT_CHARS)) {
-      throw new Error(`Manual resume prompt must contain between 1 and ${MAX_MANUAL_PROMPT_CHARS} characters`);
-    }
-    if (typeof compaction !== "boolean") throw new Error("Manual compaction flag must be boolean");
-    const manualSubmitTimeoutMs = compaction
-      ? MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS
-      : MANUAL_SUBMIT_TIMEOUT_MS;
-    const completion = this.manualCompletionSignals.get(traceId);
-    if (completion) {
-      throw new Error(completion.helperPid === helperPid
-        ? `Zero Risk turn ${traceId} is already completed`
-        : `Zero Risk turn ${traceId} is owned by another process`);
-    }
-    const terminal = this.manualTerminalSignals.get(traceId);
-    if (terminal?.helperPid === helperPid) {
-      const error = new Error(terminal.status === "timeout"
-        ? `Zero Risk turn ${traceId} timed out before Sent confirmation`
-        : `Zero Risk turn ${traceId} is already ${terminal.status}`);
-      error.code = terminal.status === "timeout" ? "manual_turn_timed_out" : "turn_cancelled";
-      throw error;
-    }
-    const sameTrace = [...this.turnTabs.values()].find(tab => tab.traceId === traceId);
-    if (sameTrace) {
-      if (sameTrace.interactionMode !== "manual") {
-        throw new Error(`Browser turn ${traceId} already belongs to automatic interaction`);
-      }
-      if (sameTrace.helperPid !== helperPid) {
-        if (processRunning(sameTrace.helperPid)) {
-          throw new Error(`Zero Risk turn ${traceId} is owned by another process`);
-        }
-        this.signalManualTerminal(sameTrace, "failed");
-        this.removeTurnTab(sameTrace, true);
-        this.rememberManualTerminal(traceId, helperPid, "failed");
-        const error = new Error(
-          `Zero Risk turn ${traceId} lost its original runtime owner and cannot be resumed; start a new Codex turn`,
-        );
-        error.code = "manual_turn_owner_lost";
-        throw error;
-      }
-      if (sameTrace.manualSubmitTimeoutMs !== manualSubmitTimeoutMs) {
-        throw new Error(`Zero Risk turn ${traceId} was retried with a different compaction mode`);
-      }
-      const retryPrompt = sameTrace.manualConversationReused ? resumePrompt : prompt;
-      if (typeof retryPrompt !== "string"
-        || sameTrace.promptDigest !== manualPromptDigest(retryPrompt)) {
-        throw new Error(`Zero Risk turn ${traceId} was retried with a different prompt`);
-      }
-      sameTrace.helperPid = helperPid;
-      this.selectedTabId = sameTrace.id;
-      this.showWindow();
-      this.show();
-      this.publishState?.(this.snapshot());
-      return {
-        tabId: sameTrace.id,
-        reused: true,
-        deadlineAt: sameTrace.manualDeadlineAt ? new Date(sameTrace.manualDeadlineAt).toISOString() : null,
-        state: sameTrace.manualState,
-      };
-    }
-    const retained = conversationKey
-      ? [...this.turnTabs.values()].filter(tab => (
-          tab.interactionMode === "manual"
-          && tab.status === "ready"
-          && tab.conversationKey === conversationKey
-        ))
-      : [];
-    if (retained.length > 1) {
-      throw new Error(`Manual ChatGPT conversation ${conversationKey} owns multiple browser tabs`);
-    }
-    let tab = retained[0];
-    if (tab) {
-      if (typeof resumePrompt !== "string" || !resumePrompt) {
-        throw new Error("A retained Zero Risk conversation requires an incremental resume prompt");
-      }
-      this.writeManualPrompt(resumePrompt);
-      tab.traceId = traceId;
-      tab.helperPid = helperPid;
-      tab.status = "running";
-      tab.loading = false;
-      tab.message = "Paste the copied prompt, add any images yourself because Zero Risk cannot transfer them, choose a model and effort, then press Sent";
-      tab.manualState = "awaiting-user";
-      tab.manualSubmitTimeoutMs = manualSubmitTimeoutMs;
-      tab.manualDeadlineAt = Date.now() + manualSubmitTimeoutMs;
-      tab.prompt = resumePrompt;
-      tab.promptDigest = manualPromptDigest(resumePrompt);
-      tab.manualConversationReused = true;
-      tab.sentAt = null;
-      tab.manualTerminalResolutionSuppressed = false;
-    } else {
-      tab = this.createManualTurnTab(
-        traceId,
-        helperPid,
-        conversationKey,
-        prompt,
-        manualSubmitTimeoutMs,
-      );
-      try {
-        this.writeManualPrompt(prompt);
-      } catch (error) {
-        this.signalManualTerminal(tab, "failed");
-        this.removeTurnTab(tab, true);
-        throw error;
-      }
-    }
-    this.armManualTurnDeadline(tab);
-    this.selectedTabId = tab.id;
-    this.showWindow();
-    this.show();
-    this.publishState?.(this.snapshot());
-    this.writeDescriptor();
-    this.logger.info("browser.manual_turn_started", {
-      tabId: tab.id,
-      traceId,
-      reused: retained.length === 1,
-    });
-    return {
-      tabId: tab.id,
-      reused: retained.length === 1,
-      deadlineAt: new Date(tab.manualDeadlineAt).toISOString(),
-      state: tab.manualState,
-    };
-  }
-
-  async waitManualSent(traceId, helperPid, observerTimeoutMs = 35_000) {
-    const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
-    if (!tab) {
-      const terminal = this.manualTerminalSignals.get(traceId);
-      if (terminal?.helperPid === helperPid) return { status: terminal.status };
-      throw new Error(`Zero Risk turn ownership mismatch: no browser tab owns ${traceId}`);
-    }
-    if (tab.interactionMode !== "manual" || tab.helperPid !== helperPid) {
-      throw new Error(`Zero Risk turn ${traceId} ownership is invalid`);
-    }
-    if (["sent", "running", "completed"].includes(tab.manualState)) {
-      return { status: "sent", sentAt: tab.sentAt };
-    }
-    if (tab.manualState !== "awaiting-user") {
-      return { status: tab.manualState === "timed-out" ? "timeout" : tab.manualState };
-    }
-    return await new Promise((resolve) => {
-      let settled = false;
-      const finish = (result) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(observerTimer);
-        tab.manualWaiters.delete(finish);
-        resolve(result);
-      };
-      const observerTimer = setTimeout(() => finish({ status: "pending" }), observerTimeoutMs);
-      observerTimer.unref?.();
-      tab.manualWaiters.add(finish);
-    });
-  }
-
-  async waitManualTerminal(traceId, helperPid, observerTimeoutMs = 35_000) {
-    const terminal = this.manualTerminalSignals.get(traceId);
-    if (terminal?.helperPid === helperPid) return { status: terminal.status };
-    const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
-    if (!tab || tab.interactionMode !== "manual" || tab.helperPid !== helperPid) {
-      throw new Error(`Zero Risk turn ownership mismatch: no browser tab owns ${traceId}`);
-    }
-    return await new Promise((resolve) => {
-      let settled = false;
-      const finish = (result) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(observerTimer);
-        tab.manualTerminalWaiters.delete(finish);
-        resolve(result);
-      };
-      const observerTimer = setTimeout(() => finish({ status: "pending" }), observerTimeoutMs);
-      observerTimer.unref?.();
-      tab.manualTerminalWaiters.add(finish);
-    });
-  }
-
-  copyManualPrompt(tabId) {
-    const tab = this.turnTabs.get(tabId);
-    if (!tab || tab.interactionMode !== "manual" || typeof tab.prompt !== "string") {
-      throw new Error("Manual prompt is no longer available");
-    }
-    this.writeManualPrompt(tab.prompt);
-    this.logger.info("browser.manual_prompt_copied", { tabId: tab.id, traceId: tab.traceId });
-    return this.snapshot();
-  }
-
-  confirmManualSent(tabId) {
-    const tab = this.turnTabs.get(tabId);
-    if (!tab || tab.interactionMode !== "manual") throw new Error("Zero Risk tab does not exist");
-    if (tab.manualState !== "awaiting-user") {
-      if (["sent", "running", "completed"].includes(tab.manualState)) return this.snapshot();
-      throw new Error("Zero Risk turn can no longer be marked as sent");
-    }
-    if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
-    tab.manualDeadlineTimer = null;
-    tab.manualState = "sent";
-    // Sent ends the human handoff deadline. Model thinking is owned by the live turn and
-    // remains cancellable through its helper or tab, including before the first MCP bind.
-    tab.manualDeadlineAt = null;
-    tab.sentAt = new Date().toISOString();
-    tab.prompt = null;
-    tab.message = "Prompt sent; waiting for ChatGPT to start through the Codex harness";
-    for (const resolve of tab.manualWaiters) resolve({ status: "sent", sentAt: tab.sentAt });
-    tab.manualWaiters.clear();
-    this.publishState?.(this.snapshot());
-    this.logger.info("browser.manual_prompt_confirmed", { tabId: tab.id, traceId: tab.traceId });
-    return this.snapshot();
-  }
-
-  markManualTurnStarted(traceId, helperPid) {
-    const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
-    if (!tab || tab.interactionMode !== "manual" || tab.helperPid !== helperPid) {
-      throw new Error(`Zero Risk turn ownership mismatch: no browser tab owns ${traceId}`);
-    }
-    if (tab.manualState !== "sent" && tab.manualState !== "running") {
-      throw new Error(`Zero Risk turn ${traceId} was not confirmed as sent`);
-    }
-    if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
-    tab.manualDeadlineTimer = null;
-    tab.manualDeadlineAt = null;
-    tab.manualState = "running";
-    tab.message = "ChatGPT is working through the Codex harness";
-    tab.lastHeartbeatAt = Date.now();
-    this.publishState?.(this.snapshot());
-    return this.snapshot();
-  }
-
-  endManualTurn(traceId, helperPid, status, retain = false) {
-    const completion = this.manualCompletionSignals.get(traceId);
-    if (completion?.helperPid === helperPid) return { cancelledByUser: false };
-    const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
-    if (!tab || tab.interactionMode !== "manual" || tab.helperPid !== helperPid) {
-      const terminal = this.manualTerminalSignals.get(traceId);
-      if (terminal?.helperPid === helperPid) return { cancelledByUser: terminal.status === "cancelled" };
-      throw new Error(`Zero Risk turn ownership mismatch: no browser tab owns ${traceId}`);
-    }
-    if (tab.manualState === "completed") {
-      this.rememberManualCompletion(traceId, helperPid);
-      return { cancelledByUser: false };
-    }
-    if (status === "completed" && tab.manualState !== "sent" && tab.manualState !== "running") {
-      throw new Error(`Zero Risk turn ${traceId} cannot complete before Sent confirmation`);
-    }
-    if (status === "completed" && retain && tab.conversationKey) {
-      if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
-      tab.manualDeadlineTimer = null;
-      tab.manualDeadlineAt = null;
-      tab.prompt = null;
-      tab.promptDigest = null;
-      tab.manualState = "completed";
-      tab.status = "ready";
-      tab.message = "Task completed";
-      tab.loading = false;
-      tab.lastHeartbeatAt = Date.now();
-      this.rememberManualCompletion(traceId, helperPid);
-      this.logger.info("browser.manual_turn_completed", { tabId: tab.id, traceId, status: "completed", retained: true });
-      this.publishState?.(this.snapshot());
-      return { cancelledByUser: false };
-    }
-    const cancelledByUser = this.manualTerminalSignals.get(traceId)?.status === "cancelled";
-    if (status === "completed") {
-      if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
-      tab.manualDeadlineTimer = null;
-      tab.manualDeadlineAt = null;
-      tab.prompt = null;
-      tab.promptDigest = null;
-      tab.manualState = "completed";
-      tab.manualTerminalResolutionSuppressed = true;
-      this.rememberManualCompletion(traceId, helperPid);
-    } else {
-      this.signalManualTerminal(tab, status === "aborted" ? "cancelled" : status);
-    }
-    this.removeTurnTab(tab, false);
-    if (status === "completed") {
-      this.logger.info("browser.manual_turn_completed", { tabId: tab.id, traceId, status: "completed", retained: false });
-    }
-    return { cancelledByUser };
-  }
-
-  cancelManualTurn(traceId, helperPid) {
-    const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
-    if (!tab || tab.interactionMode !== "manual" || tab.helperPid !== helperPid) {
-      throw new Error(`Zero Risk turn ownership mismatch: no browser tab owns ${traceId}`);
-    }
-    this.signalManualTerminal(tab, "cancelled");
-    this.removeTurnTab(tab, true);
-    return { cancelledByUser: true };
-  }
-
   async beginTurn(
     traceId,
     reveal,
@@ -2273,16 +1426,18 @@ class BrowserHost {
       throw new BrowserTurnCancelledError(traceId);
     }
     const sameTrace = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
-    if (sameTrace && sameTrace.interactionMode !== "automatic") {
-      throw new Error(`Browser turn ${traceId} already belongs to Zero Risk interaction`);
-    }
     if (sameTrace && (sameTrace.conversationKey !== conversationKey
       || sameTrace.connectorIdentity !== connectorIdentity)) {
       throw new Error(`ChatGPT browser turn ${traceId} conversation metadata does not match its owned tab`);
     }
+    if (sameTrace
+      && !this.isTurnActive(sameTrace)
+      && !(sameTrace.status === "ready" && sameTrace.resumeEligible === true)) {
+      throw new Error(`ChatGPT browser turn ${traceId} has already reached a terminal state`);
+    }
     const retainedMatches = conversationKey ? [...this.turnTabs.values()].filter((tab) => (
-      tab.interactionMode === "automatic"
-      && tab.status === "ready"
+      tab.status === "ready"
+      && tab.resumeEligible === true
       && tab.conversationKey === conversationKey
       && tab.connectorIdentity === connectorIdentity
       && (!connectorIdentity || tab.connectorBound === true)
@@ -2294,10 +1449,11 @@ class BrowserHost {
     if (sameTrace?.status === "ready" && sameTrace !== exactRetained) {
       throw new Error(`ChatGPT browser turn ${traceId} is retained under different conversation metadata`);
     }
-    const existing = sameTrace?.status === "running" ? sameTrace : exactRetained;
+    const existing = sameTrace && this.isTurnActive(sameTrace) ? sameTrace : exactRetained;
     if (existing) {
-      const reused = existing.status === "ready";
-      if (existing.status === "running" && existing.helperPid !== helperPid) {
+      const wasActive = this.isTurnActive(existing);
+      const reused = existing.status === "ready" && existing.resumeEligible === true;
+      if (wasActive && existing.helperPid !== helperPid) {
         if (processRunning(existing.helperPid)) {
           throw new Error(`ChatGPT browser turn ${traceId} is owned by another helper process`);
         }
@@ -2311,12 +1467,12 @@ class BrowserHost {
       }
       existing.helperPid = helperPid;
       existing.traceId = traceId;
-      existing.status = "running";
-      existing.loading = true;
-      existing.message = "ChatGPT is working";
-      if (!reused) {
-        existing.bootstrapReady = false;
-        existing.bootstrapDeadlineAt = Date.now() + TURN_TAB_BOOTSTRAP_TIMEOUT_MS;
+      if (!wasActive) {
+        existing.status = "running";
+        existing.executionActive = true;
+        existing.resumeEligible = false;
+        existing.loading = true;
+        existing.message = "ChatGPT is working";
       }
       existing.lastHeartbeatAt = Date.now();
       if (!existing.view.webContents.isDestroyed()) {
@@ -2375,18 +1531,24 @@ class BrowserHost {
       );
     }
     const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
-    tab.status = status === "completed" ? "ready" : status === "aborted" ? "aborted" : "error";
+    const pageCompleted = status === "completed" && tab.surfaceError !== true;
+    tab.status = pageCompleted ? "ready" : status === "aborted" ? "aborted" : "error";
+    tab.executionActive = false;
+    tab.resumeEligible = pageCompleted
+      && retain
+      && Boolean(tab.conversationKey)
+      && (!tab.connectorIdentity || connectorBound);
     this.syncPowerSaveBlocker();
-    tab.message = status === "completed" ? "Task completed" : message || `ChatGPT turn ${status}`;
+    if (pageCompleted) tab.message = "Task completed";
+    else if (!tab.message || tab.message === "ChatGPT is working") {
+      tab.message = message || `ChatGPT turn ${status}`;
+    }
     tab.loading = false;
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
-    if (status === "completed") {
+    if (pageCompleted) {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }
-    if (status === "completed"
-      && retain
-      && tab.conversationKey
-      && (!tab.connectorIdentity || connectorBound)) {
+    if (tab.resumeEligible) {
       tab.connectorBound = connectorBound === true;
       tab.lastHeartbeatAt = Date.now();
       if (hideAfterTurn && !this.activeTraceId) this.hide();
@@ -2395,11 +1557,15 @@ class BrowserHost {
       this.writeDescriptor();
       return { cancelledByUser };
     }
-    // A browser tab represents an active Codex turn, not durable task history. The result already
-    // lives in Codex, so release the terminal browser document without touching concurrent turns.
-    this.removeTurnTab(tab, false);
     if (hideAfterTurn && !this.activeTraceId) this.hide();
-    this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });
+    this.publishState?.(this.snapshot());
+    this.writeDescriptor();
+    this.logger.info("browser.tab_kept_open", {
+      tabId: tab.id,
+      traceId,
+      status: tab.status,
+      resumeEligible: tab.resumeEligible,
+    });
     return { cancelledByUser };
   }
 
@@ -2416,7 +1582,6 @@ class BrowserHost {
   }
 
   openLogin() {
-    requireAutomaticBrowserInspection(this, "Automated ChatGPT sign-in verification");
     if (this.state.authenticated) {
       this.activateHomeSurface();
       this.show();
@@ -2458,7 +1623,6 @@ class BrowserHost {
   }
 
   openPasskeyLogin() {
-    requireAutomaticBrowserInspection(this, "Automated ChatGPT passkey import");
     if (this.state.authenticated) {
       this.activateHomeSurface();
       this.show();
@@ -2495,7 +1659,6 @@ class BrowserHost {
   }
 
   async importChromeCookies(profileId) {
-    requireAutomaticBrowserInspection(this, "Chrome cookie import");
     if (process.platform !== "darwin") throw new Error("Chrome cookie import is supported only on macOS");
     if (this.loginOperation) throw new Error("ChatGPT login is already in progress");
     return await this.withManualOperation("Chrome cookie import", async () => {
@@ -2509,8 +1672,7 @@ class BrowserHost {
   async clearOwnedSessionForImport() {
     if (!(this.turnTabs instanceof Map)) throw new Error("Owned ChatGPT tab registry is unavailable");
     if (this.authView) this.closeAuthView(this.authView, true, false);
-    const tabs = [...this.turnTabs.values()];
-    const contents = [this.view, ...tabs.map(tab => tab.view)]
+    const contents = [this.view]
       .map(view => view?.webContents)
       .filter(candidate => candidate && !candidate.isDestroyed());
     if (contents.length === 0) throw new Error("Owned ChatGPT browser session is unavailable");
@@ -2522,7 +1684,6 @@ class BrowserHost {
     await browserSession.clearStorageData();
     browserSession.flushStorageData();
     await browserSession.cookies.flushStore();
-    for (const tab of tabs) this.removeTurnTab(tab, false);
   }
 
   async resetFailedSessionLogin() {
@@ -2535,7 +1696,6 @@ class BrowserHost {
   }
 
   async installSessionLogin(transfer, source = "passkey") {
-    requireAutomaticBrowserInspection(this, "Automated ChatGPT session import");
     if (!transfer || typeof transfer !== "object" || typeof transfer.cleanup !== "function") {
       throw new Error("Session import returned an invalid transfer handle");
     }
@@ -2636,7 +1796,6 @@ class BrowserHost {
   }
 
   async logout() {
-    requireAutomaticBrowserInspection(this, "Automated ChatGPT logout verification");
     return await this.withManualOperation("ChatGPT logout", async () => {
       if (this.authView) this.closeAuthView(this.authView, true, false);
       const contents = this.view.webContents;
@@ -2660,7 +1819,6 @@ class BrowserHost {
   }
 
   refreshAuthentication() {
-    requireAutomaticBrowserInspection(this, "ChatGPT authentication refresh");
     if (this.sessionRefreshOperation) return this.sessionRefreshOperation;
     const operation = this.withManualOperation("session refresh", async () => {
       this.setState({ status: "loading", message: "Checking saved ChatGPT session" });
@@ -2682,7 +1840,6 @@ class BrowserHost {
   }
 
   async probeAuthentication() {
-    requireAutomaticBrowserInspection(this, "ChatGPT authentication probe");
     if (!this.view || this.view.webContents.isDestroyed()) return this.snapshot();
     let url = this.view.webContents.getURL();
     if (url === IDLE_BROWSER_URL) {
@@ -2836,7 +1993,6 @@ class BrowserHost {
   }
 
   async smokeTest() {
-    requireAutomaticBrowserInspection(this, "ChatGPT browser smoke test");
     return await this.withManualOperation("browser smoke test", () => this.runSmokeTest());
   }
 
@@ -2848,7 +2004,6 @@ class BrowserHost {
   }
 
   async runSmokeTest() {
-    requireAutomaticBrowserInspection(this, "ChatGPT browser smoke test");
     const connectorName = this.connectorName();
     this.show();
     await this.waitForSurfaceReady();
@@ -2874,12 +2029,10 @@ class BrowserHost {
   }
 
   async verifyConnector(appName) {
-    requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
     return await this.withManualOperation("connector verification", () => this.runConnectorVerification(appName));
   }
 
   async runConnectorVerification(appName) {
-    requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
     const connectorName = validateConnectorName(appName);
     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
     await this.refreshChatGptHomeDocument();
@@ -2905,15 +2058,10 @@ class BrowserHost {
   }
 
   async inspectSession(detectCapabilities = false) {
-    requireAutomaticBrowserInspection(this, "ChatGPT session and capability inspection");
-    if (this.manualOperation === INTERACTION_MODE_CHANGE_OPERATION) {
-      return await this.runSessionInspection(detectCapabilities);
-    }
     return await this.withManualOperation("session inspection", () => this.runSessionInspection(detectCapabilities));
   }
 
   async runSessionInspection(detectCapabilities = false) {
-    requireAutomaticBrowserInspection(this, "ChatGPT session and capability inspection");
     const connectorName = this.connectorName();
     const initialUrl = this.view.webContents.getURL();
     const startedIdle = initialUrl === IDLE_BROWSER_URL;
@@ -2967,15 +2115,12 @@ class BrowserHost {
 
   writeDescriptor() {
     const surfaceTargets = {};
-    if (browserInteractionModeFor(this) === "automatic") {
-      const surfaces = [[this.surfaceId, this.view?.webContents],
-        ...[...this.turnTabs.values()].filter(tab => tab.interactionMode === "automatic")
-          .map(tab => [tab.surfaceId, tab.view.webContents])];
-      for (const [surfaceId, contents] of surfaces) {
-        if (!contents || contents.isDestroyed()) continue;
-        if (Object.hasOwn(surfaceTargets, surfaceId)) throw new Error("Browser surface ownership is duplicated");
-        surfaceTargets[surfaceId] = contents.getOrCreateDevToolsTargetId();
-      }
+    const surfaces = [[this.surfaceId, this.view?.webContents],
+      ...[...this.turnTabs.values()].map(tab => [tab.surfaceId, tab.view.webContents])];
+    for (const [surfaceId, contents] of surfaces) {
+      if (!contents || contents.isDestroyed()) continue;
+      if (Object.hasOwn(surfaceTargets, surfaceId)) throw new Error("Browser surface ownership is duplicated");
+      surfaceTargets[surfaceId] = contents.getOrCreateDevToolsTargetId();
     }
     const descriptor = {
       version: 3,
@@ -3003,6 +2148,8 @@ class BrowserHost {
   }
 
   destroy() {
+    this.destroying = true;
+    this.destroying = true;
     try {
       const current = JSON.parse(fs.readFileSync(this.descriptorPath, "utf8"));
       if (current.pid === process.pid) fs.rmSync(this.descriptorPath, { force: true });
@@ -3016,25 +2163,11 @@ class BrowserHost {
     }
     this.closeAuthView(this.authView, true);
     this.clearHomeNavigationTimeout();
-    if (this.turnLeaseSweep) clearInterval(this.turnLeaseSweep);
-    if (this.resumeListener && powerMonitor && typeof powerMonitor.removeListener === "function") {
-      powerMonitor.removeListener("resume", this.resumeListener);
-      this.resumeListener = null;
-    }
     if (this.powerSaveBlockerId !== null && powerSaveBlocker && typeof powerSaveBlocker.stop === "function") {
       powerSaveBlocker.stop(this.powerSaveBlockerId);
       this.powerSaveBlockerId = null;
     }
     for (const tab of this.turnTabs.values()) {
-      if (tab.interactionMode === "manual") {
-        if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
-        tab.prompt = null;
-        tab.promptDigest = null;
-        for (const resolve of tab.manualWaiters || []) resolve({ status: "cancelled" });
-        tab.manualWaiters?.clear();
-        for (const resolve of tab.manualTerminalWaiters || []) resolve({ status: "cancelled" });
-        tab.manualTerminalWaiters?.clear();
-      }
       try { this.window.contentView.removeChildView(tab.view); } catch {}
       if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     }
@@ -3052,8 +2185,6 @@ module.exports = {
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
-  MANUAL_SUBMIT_TIMEOUT_MS,
-  MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,
   navigationOriginForLog,
   TEMPORARY_CHAT_URL,

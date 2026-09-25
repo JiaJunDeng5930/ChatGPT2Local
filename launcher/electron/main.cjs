@@ -473,13 +473,6 @@ function validateLanguage(value) {
   return value;
 }
 
-function validateBrowserInteractionMode(value) {
-  if (value !== "automatic" && value !== "manual") {
-    throw new Error("Browser interaction mode must be automatic or manual");
-  }
-  return value;
-}
-
 function validateBounds(value) {
   if (!value || typeof value !== "object") throw new Error("Browser bounds are required");
   for (const key of ["x", "y", "width", "height"]) {
@@ -504,10 +497,6 @@ function registerIpc({ logger, stateStore }) {
     state: stateStore.read(),
     browser: browserHost?.snapshot() ?? null,
     connectorName: runtimeHost.browserConnectorName(),
-    connectorNames: {
-      automatic: runtimeHost.setupConnectorName(),
-      manual: "Codex Zero Risk",
-    },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
     logs: logger.recent(),
     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
@@ -535,20 +524,16 @@ function registerIpc({ logger, stateStore }) {
     const patch = target === "github" ? { githubOpened: true } : { xOpened: true };
     return stateStore.update(patch);
   });
-  handle("launcher:complete-onboarding", (_event, language, rawInteractionMode) => {
+  handle("launcher:complete-onboarding", (_event, language) => {
     const current = stateStore.read();
     if (!current.githubOpened || !current.xOpened) throw new Error("Open the GitHub and X pages before continuing");
     if (current.autoStart) setAutostart(app, true);
     const next = stateStore.update({
       language: validateLanguage(language),
-      browserInteractionMode: validateBrowserInteractionMode(rawInteractionMode),
       onboardingComplete: true,
     });
     updateTrayMenu(next.language);
-    logger.info("launcher.onboarding_completed", {
-      language: next.language,
-      browserInteractionMode: next.browserInteractionMode,
-    });
+    logger.info("launcher.onboarding_completed", { language: next.language });
     return next;
   });
 
@@ -563,16 +548,12 @@ function registerIpc({ logger, stateStore }) {
     return true;
   });
   handle("launcher:browser-surface-active", (_event, active) => browserHost.setSurfaceActive(active === true));
-  handle("launcher:browser-show", () => browserHost.reveal(
-    stateStore.read().browserInteractionMode === "automatic",
-  ));
+  handle("launcher:browser-show", () => browserHost.reveal());
   handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
   handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
   handle("launcher:browser-zoom", (_event, action) => browserHost.zoom(action));
   handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
   handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
-  handle("launcher:manual-prompt-copy", (_event, tabId) => browserHost.copyManualPrompt(tabId));
-  handle("launcher:manual-prompt-sent", (_event, tabId) => browserHost.confirmManualSent(tabId));
   handle("launcher:browser-login", async () => {
     const browser = await browserHost.openLogin();
     if (browser.authenticated) {
@@ -591,9 +572,6 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:chrome-cookie-profiles", async () => {
     if (process.platform !== "darwin") throw new Error("Chrome cookie import is supported only on macOS");
-    if (stateStore.read().browserInteractionMode !== "automatic") {
-      throw new Error("Chrome cookie import requires automatic browser mode");
-    }
     return await require("./chrome-cookie-import.cjs").listChromeProfiles();
   });
   handle("launcher:chrome-cookie-import", async (_event, profileId) => {
@@ -618,9 +596,6 @@ function registerIpc({ logger, stateStore }) {
     return state;
   });
   handle("launcher:browser-smoke", async () => {
-    if (stateStore.read().browserInteractionMode === "manual") {
-      throw new Error("Browser smoke testing is disabled in Zero Risk mode");
-    }
     const result = await browserHost.smokeTest();
     stateStore.update({ browserSmokePassed: true, browserSmokeVersion: app.getVersion() });
     smokePassedThisSession = true;
@@ -661,23 +636,6 @@ function registerIpc({ logger, stateStore }) {
       send("launcher:state-changed", state);
       publishOperation({ name: operationName, status: "failed", message });
       return report;
-    }
-    if (stateStore.read().browserInteractionMode === "manual") {
-      const state = stateStore.update({ mcpSetupComplete: true });
-      send("launcher:state-changed", state);
-      const successMessage = "Local Zero Risk runtime is healthy; connector selection remains a manual turn step";
-      publishOperation({ name: operationName, status: "completed", message: successMessage });
-      return {
-        ...report,
-        checks: [
-          ...report.checks.filter((check) => check.id !== "connector"),
-          {
-            id: "connector",
-            status: "warning",
-            message: `Select ChatGPT connector ${JSON.stringify(runtimeHost.mcpConnectorName())} manually for every Zero Risk turn`,
-          },
-        ],
-      };
     }
     try {
       publishOperation({ name: operationName, status: "running", message: "Checking ChatGPT connector" });
@@ -745,10 +703,8 @@ function registerIpc({ logger, stateStore }) {
       mcpRuntimeInstalled: false,
       mcpGuideStep: 0,
       codexRestartRequired: true,
-      browserInteractionMode: "automatic",
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
-      zeroRiskProEnabled: false,
     });
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
@@ -756,19 +712,16 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:setup-core", async () => {
     const setupState = stateStore.read();
-    if (setupState.browserInteractionMode === "automatic") {
-      const browser = await browserHost.probeAuthentication();
-      if (!browser.authenticated) {
-        if (browser.status === "error") throw new Error(browser.message);
-        throw new Error(
-          IS_DEV_PROFILE
-            ? "Sign in to the isolated DEV ChatGPT profile before configuring the harness"
-            : "Sign in to ChatGPT before installing the Codex integration",
-        );
-      }
+    const browser = await browserHost.probeAuthentication();
+    if (!browser.authenticated) {
+      if (browser.status === "error") throw new Error(browser.message);
+      throw new Error(
+        IS_DEV_PROFILE
+          ? "Sign in to the isolated DEV ChatGPT profile before configuring the harness"
+          : "Sign in to ChatGPT before installing the Codex integration",
+      );
     }
-    if (setupState.browserInteractionMode === "automatic"
-      && !setupState.coreSetupComplete
+    if (!setupState.coreSetupComplete
       && !(smokePassedThisSession || smokePassedForCurrentVersion(setupState))) {
       throw new Error(
         IS_DEV_PROFILE
@@ -781,7 +734,6 @@ function registerIpc({ logger, stateStore }) {
       coreSetupComplete: true,
       codexCatalogVerified: IS_DEV_PROFILE ? true : false,
       codexRestartRequired: IS_DEV_PROFILE ? false : true,
-      zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       ...(result.mode === "full" ? {
         mcpRuntimeInstalled: true,
         mcpSetupComplete: false,
@@ -801,28 +753,16 @@ function registerIpc({ logger, stateStore }) {
     return { ok: true, stdout: result.stdout, restartRequired: !IS_DEV_PROFILE };
   });
   handle("launcher:setup-mcp", async (_event, input) => {
-    const currentMode = stateStore.read().browserInteractionMode;
-    const interactionMode = input?.interactionMode === undefined
-      ? currentMode
-      : validateBrowserInteractionMode(input.interactionMode);
-    const interactionModeChange = interactionMode !== currentMode;
     const setup = IS_DEV_PROFILE
       ? runtimeHost.setupDevMcp.bind(runtimeHost)
       : runtimeHost.setupMcp.bind(runtimeHost);
-    const runSetup = afterRuntimeReady => setup({
+    await browserHost.reveal();
+    const result = await setup({
       tunnelId: typeof input?.tunnelId === "string" ? input.tunnelId.trim() : "",
       runtimeKey: typeof input?.runtimeKey === "string" ? input.runtimeKey : "",
       replace: input?.replace === true,
-      interactionMode,
-    }, afterRuntimeReady);
-    if (!interactionModeChange && interactionMode === "automatic") await browserHost.reveal();
-    const result = interactionModeChange
-      ? await browserHost.withInteractionModeChange(interactionMode, runSetup)
-      : await runSetup();
+    });
     const state = stateStore.update({
-      browserInteractionMode: interactionMode,
-      ...(interactionMode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
-      zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       coreSetupComplete: true,
       codexCatalogVerified: IS_DEV_PROFILE,
       mcpRuntimeInstalled: true,
@@ -831,7 +771,6 @@ function registerIpc({ logger, stateStore }) {
       codexRestartRequired: IS_DEV_PROFILE ? false : true,
     });
     send("launcher:state-changed", state);
-    if (interactionModeChange) send("launcher:browser-state", browserHost.snapshot());
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
     return { ok: true, stdout: result.stdout };
   });
@@ -868,59 +807,6 @@ function registerIpc({ logger, stateStore }) {
     const state = stateStore.update({ experimentalSkillAttachments: result.enabled });
     send("launcher:state-changed", state);
     return state;
-  });
-  handle("launcher:zero-risk-pro", async (_event, enabled) => {
-    const browserOperation = browserHost.currentOperation();
-    if (browserHost.activeTraceId || browserOperation) {
-      throw new Error(
-        browserHost.activeTraceId
-          ? "Finish or cancel active ChatGPT turns before changing Zero Risk model profiles"
-          : `Finish ${browserOperation} before changing Zero Risk model profiles`,
-      );
-    }
-    const result = await runtimeHost.setZeroRiskPro(enabled === true);
-    const state = stateStore.update({
-      zeroRiskProEnabled: result.enabled,
-      codexCatalogVerified: IS_DEV_PROFILE,
-      codexRestartRequired: !IS_DEV_PROFILE,
-    });
-    send("launcher:state-changed", state);
-    if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
-    return state;
-  });
-  handle("launcher:browser-interaction-mode", async (_event, rawMode) => {
-    const mode = validateBrowserInteractionMode(rawMode);
-    const current = stateStore.read();
-    if (current.browserInteractionMode === mode) {
-      return { state: current, credentialsRequired: false, targetMode: mode };
-    }
-    const browserOperation = browserHost.currentOperation();
-    if (browserHost.activeTraceId || browserOperation) {
-      throw new Error(
-        browserHost.activeTraceId
-          ? "Finish or cancel active ChatGPT turns before changing browser interaction mode"
-          : `Finish ${browserOperation} before changing browser interaction mode`,
-      );
-    }
-    if (!runtimeHost.mcpCredentialsConfigured(mode)) {
-      return { state: current, credentialsRequired: true, targetMode: mode };
-    }
-    const result = await browserHost.withInteractionModeChange(
-      mode,
-      afterRuntimeReady => runtimeHost.setBrowserInteractionMode(mode, afterRuntimeReady),
-    );
-    const state = stateStore.update({
-      browserInteractionMode: mode,
-      ...(mode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
-      ...(result.configured ? {
-        codexCatalogVerified: IS_DEV_PROFILE,
-        codexRestartRequired: !IS_DEV_PROFILE,
-      } : {}),
-    });
-    send("launcher:state-changed", state);
-    send("launcher:browser-state", browserHost.snapshot());
-    if (!IS_DEV_PROFILE && result.configured) startCatalogVerificationMonitor({ logger, stateStore });
-    return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:browser-timezone", async (_event, timezone) => {
     const previous = stateStore.read().browserTimezone;
@@ -1114,13 +1000,7 @@ async function start() {
     launcherProfile: LAUNCHER_PROFILE.kind,
     publishOperation,
     supervisor: runtimeSupervisor,
-    getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
-  const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
-  if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
-    && stateStore.read().browserInteractionMode !== configuredInteractionMode) {
-    stateStore.update({ browserInteractionMode: configuredInteractionMode });
-  }
   browserHost = new BrowserHost({
     window: mainWindow,
     descriptorPath: BROWSER_DESCRIPTOR_PATH,
@@ -1136,7 +1016,6 @@ async function start() {
     browserTimezone: stateStore.read().browserTimezone,
     publishState: (state) => send("launcher:browser-state", state),
     showWindow: showMainWindow,
-    getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
   await browserHost.ready();
   const updaterRuntimeRoot = runtimeRootProvider();
@@ -1158,7 +1037,7 @@ async function start() {
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
   let startupAuthenticationRefresh = Promise.resolve();
-  if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
+  if (!launcherSmokeTest) {
     startupAuthenticationRefresh = browserHost.refreshAuthentication().catch((error) => {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
@@ -1223,7 +1102,6 @@ async function start() {
       autoStart: false,
       experimentalBiggerContext: config?.experimentalBiggerContext === true,
       experimentalSkillAttachments: config?.experimentalSkillAttachments === true,
-      zeroRiskProEnabled: config?.zeroRiskProEnabled === true,
     });
     send("launcher:state-changed", state);
     logger.info("dev_profile.ready", {
@@ -1250,7 +1128,6 @@ async function start() {
         codexRestartRequired: true,
         experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
         experimentalSkillAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalSkillAttachments === true,
-        zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
         ...(upgrade.mode === "full" ? {
           mcpRuntimeInstalled: true,
           mcpSetupComplete: false,
@@ -1273,12 +1150,10 @@ async function start() {
     if (configuredRuntime.configured) {
       const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
       const experimentalSkillAttachments = configuredRuntime.config?.experimentalSkillAttachments === true;
-      const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
       const saved = stateStore.read();
       if (saved.experimentalSkillAttachments !== experimentalSkillAttachments
-        || saved.experimentalBiggerContext !== enabled
-        || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSkillAttachments, zeroRiskProEnabled });
+        || saved.experimentalBiggerContext !== enabled) {
+        const state = stateStore.update({ experimentalBiggerContext: enabled, experimentalSkillAttachments });
         send("launcher:state-changed", state);
       }
     }
@@ -1295,7 +1170,6 @@ async function start() {
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
         experimentalSkillAttachments: config.experimentalSkillAttachments === true,
-        zeroRiskProEnabled: config.zeroRiskProEnabled === true,
         ...(runtime.bridgeRouteChanged ? {
           codexCatalogVerified: false,
           codexRestartRequired: true,

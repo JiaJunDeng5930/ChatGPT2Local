@@ -21,11 +21,19 @@ async function snapshot(html: string): Promise<Snapshot> {
   const window = createWindow(html);
   const innerText = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "innerText");
   const append = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "append");
+  const querySelector = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "querySelector");
+  const dominoQuerySelector = window.HTMLElement.prototype.querySelector;
   Object.defineProperty(window.HTMLElement.prototype, "innerText", {
     configurable: true, get() { return this.textContent; },
   });
   Object.defineProperty(window.HTMLElement.prototype, "append", {
     configurable: true, value(this: HTMLElement, ...nodes: Node[]) { nodes.forEach(node => this.appendChild(node)); },
+  });
+  Object.defineProperty(window.HTMLElement.prototype, "querySelector", {
+    configurable: true,
+    value: function (this: HTMLElement, selector: string) {
+      return dominoQuerySelector.call(this, selector) ?? null;
+    },
   });
   const collections = [window.document.querySelectorAll("div"), window.document.body.children].map(Object.getPrototypeOf);
   const iterators = collections.map(prototype => Object.getOwnPropertyDescriptor(prototype, Symbol.iterator));
@@ -64,6 +72,8 @@ async function snapshot(html: string): Promise<Snapshot> {
     else delete window.HTMLElement.prototype.innerText;
     if (append) Object.defineProperty(window.HTMLElement.prototype, "append", append);
     else delete window.HTMLElement.prototype.append;
+    if (querySelector) Object.defineProperty(window.HTMLElement.prototype, "querySelector", querySelector);
+    else delete window.HTMLElement.prototype.querySelector;
   }
 }
 

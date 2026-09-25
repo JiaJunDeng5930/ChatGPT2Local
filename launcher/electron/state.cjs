@@ -15,11 +15,9 @@ const DEFAULT_STATE = Object.freeze({
   autoStart: true,
   keepRunningOnClose: true,
   showBrowserDuringTurns: true,
-  browserInteractionMode: "automatic",
   browserTimezone: "",
   experimentalBiggerContext: false,
   experimentalSkillAttachments: false,
-  zeroRiskProEnabled: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
   sidebarOpen: true,
@@ -33,12 +31,20 @@ function nextSessionRefreshReminderAt(now = Date.now()) {
   return new Date(now + SESSION_REFRESH_REMINDER_INTERVAL_MS).toISOString();
 }
 
+function stripObsoleteInteractionState(state) {
+  delete state.browserInteractionMode;
+  delete state.zeroRiskProEnabled;
+  delete state.manualControl;
+  return state;
+}
+
 function readState(filePath) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     if (!parsed || parsed.version !== 1) return { ...DEFAULT_STATE };
     const state = { ...DEFAULT_STATE, ...parsed };
     delete state.bridgeEnabled;
+    stripObsoleteInteractionState(state);
     if (state.language !== null && (typeof state.language !== "string" || !Object.hasOwn(languages, state.language))) {
       state.language = DEFAULT_STATE.language;
     }
@@ -51,7 +57,6 @@ function readState(filePath) {
       "showBrowserDuringTurns",
       "experimentalBiggerContext",
       "experimentalSkillAttachments",
-      "zeroRiskProEnabled",
       "browserSmokePassed",
       "sidebarOpen",
     ]) {
@@ -59,13 +64,6 @@ function readState(filePath) {
     }
     try { state.browserTimezone = validateBrowserTimezone(state.browserTimezone); }
     catch { state.browserTimezone = DEFAULT_STATE.browserTimezone; }
-    if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
-      state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
-    }
-    if (state.coreSetupComplete !== true) {
-      if (state.onboardingComplete !== true) state.browserInteractionMode = "automatic";
-      state.zeroRiskProEnabled = false;
-    }
     if (state.browserSmokeVersion !== null
       && (typeof state.browserSmokeVersion !== "string" || state.browserSmokeVersion.length > 128)) {
       state.browserSmokeVersion = DEFAULT_STATE.browserSmokeVersion;
@@ -99,7 +97,8 @@ function readState(filePath) {
 }
 
 function writeState(filePath, state) {
-  writePrivateFileAtomic(filePath, `${JSON.stringify(state, null, 2)}\n`);
+  const persisted = stripObsoleteInteractionState({ ...state });
+  writePrivateFileAtomic(filePath, `${JSON.stringify(persisted, null, 2)}\n`);
 }
 
 function validateSidebarState(value) {
@@ -119,7 +118,7 @@ function createStateStore(filePath) {
       return structuredClone(state);
     },
     update(patch) {
-      const next = { ...state, ...patch, version: 1 };
+      const next = stripObsoleteInteractionState({ ...state, ...patch, version: 1 });
       writeState(filePath, next);
       state = next;
       return structuredClone(next);

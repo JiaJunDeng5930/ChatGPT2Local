@@ -58,26 +58,3 @@ test("tool-capable browser prompt reads prior Codex context from a temporary fil
   }
   expect(existsSync(path!)).toBe(false);
 });
-
-test("Zero Risk prompt gives the start and context-read tool calls", () => {
-  const parsed: CodexParsedRequest = {
-    modelId: CHATGPT_WEB_MODEL_ID,
-    context: { messages: [{ role: "user", content: "current request", timestamp: 1 }] },
-    stream: true,
-    options: { reasoning: "high" },
-  };
-  const requestId = "request_12345678901234567890123456789012";
-  const compiled = compileChatGptWebPrompt(parsed, {
-    localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true,
-  }, requestId, { manualControl: true });
-  const staged = stageChatGptWebContext(compiled, parsed, requestId, true);
-  try {
-    expect(staged.text).toContain(`codex_turn_start with {"request_id":"${requestId}"}`);
-    expect(staged.text).toContain(`codex_exec with {"request_id":"${requestId}"`);
-    expect(staged.text).toContain("codex_turn_complete({request_id, final_answer})");
-    expect(staged.text).toContain("To read the temporary context file when needed");
-    expect(staged.text).not.toContain("Pass the same turn_token");
-  } finally {
-    staged.release();
-  }
-});

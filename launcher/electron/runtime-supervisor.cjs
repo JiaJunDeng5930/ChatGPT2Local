@@ -11,6 +11,7 @@ const {
   terminateOwnedProcessTree,
 } = require("./process-tree.cjs");
 const { runtimeInvocation } = require("./runtime-command.cjs");
+const { CURRENT_CONNECTOR_NAME, DEV_CONNECTOR_NAME } = require("./connector-identity.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
@@ -187,8 +188,36 @@ function managedTunnelConnectArgs(config, invocation) {
   ];
 }
 
+function normalizeLegacyInteractionConfig(config) {
+  const normalized = { ...config };
+  const manualInteraction = config.browserInteractionMode === "manual";
+  if (config.automaticAppName !== undefined) {
+    normalized.appName = config.automaticAppName;
+  } else if (manualInteraction) {
+    normalized.appName = config.purpose === "dev-harness" ? DEV_CONNECTOR_NAME : CURRENT_CONNECTOR_NAME;
+  }
+  if (config.automaticTunnel !== undefined) {
+    normalized.tunnel = config.automaticTunnel;
+  } else if (manualInteraction) {
+    delete normalized.tunnel;
+  }
+  for (const key of [
+    "browserInteractionMode",
+    "automaticAppName",
+    "manualAppName",
+    "zeroRiskProEnabled",
+    "automaticTunnel",
+    "manualTunnel",
+  ]) {
+    delete normalized[key];
+  }
+  return normalized;
+}
+
 function validateConfig(config, descriptorPath, platform = process.platform, launcherProfile = "production") {
   if (!config || config.version !== 3) throw new Error("Runtime configuration is missing or unsupported");
+  // The supervisor reads the persisted file directly, so normalize legacy fields in memory here too.
+  config = normalizeLegacyInteractionConfig(config);
   if (launcherProfile === "development") {
     if (config.purpose !== "dev-harness") {
       throw new Error("DEV launcher refuses a configuration that is not marked dev-harness");
@@ -197,14 +226,8 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
     throw new Error("Production launcher refuses a DEV harness configuration");
   }
   if (config.solAvailable === undefined) config = { ...config, solAvailable: true };
-  if (config.browserInteractionMode === undefined) {
-    config.browserInteractionMode = "automatic";
-  }
   if (config.mode !== "browser-only" && config.mode !== "full") {
     throw new Error("Runtime configuration has an invalid mode");
-  }
-  if (config.browserInteractionMode !== "automatic" && config.browserInteractionMode !== "manual") {
-    throw new Error("Runtime configuration has an invalid browser interaction mode");
   }
   if (config.subagentProtocol !== undefined
     && config.subagentProtocol !== "compatibility-v1"
@@ -296,23 +319,8 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
       }
     }
   };
-  if (config.mode === "full") {
+  if (config.mode === "full" && config.tunnel !== undefined) {
     validateTunnel(config.tunnel, "tunnel");
-    if (config.automaticTunnel !== undefined) validateTunnel(config.automaticTunnel, "automaticTunnel");
-    if (config.manualTunnel !== undefined) validateTunnel(config.manualTunnel, "manualTunnel");
-    if (config.automaticTunnel && config.manualTunnel
-      && config.automaticTunnel.tunnelId === config.manualTunnel.tunnelId) {
-      throw new Error("Automatic and Zero Risk tunnel IDs must differ");
-    }
-    const activeTunnel = config.browserInteractionMode === "manual"
-      ? config.manualTunnel
-      : config.automaticTunnel;
-    if ((config.automaticTunnel || config.manualTunnel) && !activeTunnel) {
-      throw new Error("Active browser interaction mode has no tunnel configuration");
-    }
-    if (activeTunnel && JSON.stringify(activeTunnel) !== JSON.stringify(config.tunnel)) {
-      throw new Error("Active browser interaction mode does not match the active tunnel");
-    }
   }
   return config;
 }
@@ -377,10 +385,11 @@ class RuntimeSupervisor {
 
   readSetupConfig() {
     if (!fs.existsSync(this.configPath)) return null;
-    const config = readJson(this.configPath);
-    if (!config || typeof config !== "object" || Array.isArray(config)) {
+    const rawConfig = readJson(this.configPath);
+    if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
       throw new Error("Runtime configuration is not an object");
     }
+    const config = normalizeLegacyInteractionConfig(rawConfig);
     if (this.launcherProfile === "development") {
       if (config.purpose !== "dev-harness") {
         throw new Error("DEV launcher refuses a configuration that is not marked dev-harness");
@@ -1039,11 +1048,8 @@ class RuntimeSupervisor {
   }
 
   async runTunnelConnectCommand(config) {
-    const contract = config.browserInteractionMode === "manual" ? "safe" : "native";
     const invocation = this.runtimeCommand([
       "mcp",
-      "--contract",
-      contract,
       "--broker-socket",
       config.brokerSocketPath,
     ]);

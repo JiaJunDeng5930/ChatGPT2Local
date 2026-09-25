@@ -3,6 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AstraJevSettingsStore } from "../src/astra-jev/config";
+import { HistoryStore } from "../src/astra-jev/history-store";
+import { createAstraJevService } from "../src/astra-jev/proxy";
 import { chatGptWebTraceId } from "../src/adapters/chatgpt-web";
 import { runStructuredCompactionOnce } from "../src/adapters/chatgpt-web/compaction-handoff";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
@@ -399,7 +402,7 @@ test("authenticated Interrupt hook endpoint releases the exact routed Web turn",
       browserAborted = true;
       rejectBrowser(reason ?? new Error("native turn interrupted"));
     },
-  }), "interrupt-hook-trace", "interrupt-hook-owner", turnId, threadId);
+  }), "interrupt-hook-trace", turnId, threadId);
   const server = startServer(config, {
     adapterFactory: () => ({
       name: "interrupt-test",
@@ -528,7 +531,6 @@ test("Interrupt acknowledges after exact browser cancellation starts without wai
   let resolvePhysical!: () => void;
   const physicalSettlement = new Promise<void>(resolve => { resolvePhysical = resolve; });
   let cancelled = false;
-  let replacementStarted = false;
   chatGptTurnSessions.clear();
   chatGptTurnSessions.getOrCreate("slow-cleanup", () => ({
     mode: "read-only",
@@ -537,7 +539,7 @@ test("Interrupt acknowledges after exact browser cancellation starts without wai
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { cancelled = true; },
-  }), "slow-cleanup-trace", "slow-cleanup-owner", turnId, threadId);
+  }), "slow-cleanup-trace", turnId, threadId);
   const server = startServer(config);
 
   try {
@@ -558,27 +560,6 @@ test("Interrupt acknowledges after exact browser cancellation starts without wai
       cancelled_browser_turns: 1,
     });
     expect(cancelled).toBeTrue();
-
-    const replacement = chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
-      "slow-cleanup-replacement",
-      "slow-cleanup-owner",
-      () => {
-        replacementStarted = true;
-        return {
-          mode: "read-only",
-          browser: Promise.resolve("replacement"),
-          physicalSettlement: Promise.resolve(),
-          trace: new ChatGptTraceFeed(),
-          text: new ChatGptTextFeed(),
-          cancel: () => {},
-        };
-      },
-    );
-    await Bun.sleep(10);
-    expect(replacementStarted).toBeFalse();
-    resolvePhysical();
-    await replacement;
-    expect(replacementStarted).toBeTrue();
   } finally {
     resolvePhysical();
     chatGptTurnSessions.clear();
@@ -586,12 +567,18 @@ test("Interrupt acknowledges after exact browser cancellation starts without wai
   }
 });
 
-test("Interrupt retires a logically complete browser turn whose helper is still physically stuck", async () => {
+test("Interrupt cancels a logically complete browser turn whose helper is still physically stuck", async () => {
   const config = { ...defaultConfig("browser-only"), port: 0 };
   const threadId = "thread_interrupt_logical_complete";
   const turnId = "turn_interrupt_logical_complete";
   let resolvePhysical!: () => void;
-  const physicalSettlement = new Promise<void>(resolve => { resolvePhysical = resolve; });
+  let physicallySettled = false;
+  const physicalSettlement = new Promise<void>(resolve => {
+    resolvePhysical = () => {
+      physicallySettled = true;
+      resolve();
+    };
+  });
   let cancelled = false;
   chatGptTurnSessions.clear();
   const session = chatGptTurnSessions.getOrCreate("logical-complete", () => ({
@@ -601,10 +588,10 @@ test("Interrupt retires a logically complete browser turn whose helper is still 
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
     cancel: () => { cancelled = true; },
-  }), "logical-complete-trace", "logical-complete-owner", turnId, threadId);
+  }), "logical-complete-trace", turnId, threadId);
   await session.browserOutcome;
   expect(session.isActive()).toBeFalse();
-  expect(session.isPhysicallySettled()).toBeFalse();
+  expect(physicallySettled).toBeFalse();
   const server = startServer(config);
 
   try {
@@ -621,7 +608,12 @@ test("Interrupt retires a logically complete browser turn whose helper is still 
       cancelled_browser_turns: 1,
     });
     expect(cancelled).toBeTrue();
-    expect(chatGptTurnSessions.find("logical-complete")).toBeUndefined();
+    expect(chatGptTurnSessions.find("logical-complete")).toBe(session);
+    expect(session.settledOutcome()).toMatchObject({ type: "final", answer: "complete" });
+    expect(physicallySettled).toBeFalse();
+    resolvePhysical();
+    await session.physicalSettlement;
+    expect(physicallySettled).toBeTrue();
   } finally {
     resolvePhysical();
     chatGptTurnSessions.clear();
@@ -714,8 +706,7 @@ test("authenticated lifecycle control cancels orphaned browser turns", async () 
   }
 });
 
-for (const reason of [undefined, "browser_surface_bootstrap_timeout", "helper_heartbeat_expired"] as const)
-test(`targeted cancellation preserves peer turns and its cause: ${reason ?? "user close"}`, async () => {
+test("targeted cancellation preserves peer turns and accepts explicit user close only", async () => {
   const config = { ...defaultConfig("browser-only"), port: 0 };
   const server = startServer(config);
   chatGptTurnSessions.clear();
@@ -747,9 +738,23 @@ test(`targeted cancellation preserves peer turns and its cause: ${reason ?? "use
     const unauthorized = await fetch(`http://127.0.0.1:${server.port}/admin/cancel-turn`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer invalid" },
-      body: JSON.stringify({ traceId: "trace_target", ...(reason ? { reason } : {}) }),
+      body: JSON.stringify({ traceId: "trace_target" }),
     });
     expect(unauthorized.status).toBe(401);
+
+    for (const reason of ["browser_surface_bootstrap_timeout", "helper_heartbeat_expired"] as const) {
+      const rejected = await fetch(`http://127.0.0.1:${server.port}/admin/cancel-turn`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${config.controlToken}`,
+        },
+        body: JSON.stringify({ traceId: "trace_target", reason }),
+      });
+      expect(rejected.status).toBe(400);
+      expect(targetCancelled).toBe(0);
+      expect(otherCancelled).toBe(0);
+    }
 
     const response = await fetch(`http://127.0.0.1:${server.port}/admin/cancel-turn`, {
       method: "POST",
@@ -757,7 +762,7 @@ test(`targeted cancellation preserves peer turns and its cause: ${reason ?? "use
         "content-type": "application/json",
         authorization: `Bearer ${config.controlToken}`,
       },
-      body: JSON.stringify({ traceId: "trace_target", ...(reason ? { reason } : {}) }),
+      body: JSON.stringify({ traceId: "trace_target" }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
@@ -769,52 +774,12 @@ test(`targeted cancellation preserves peer turns and its cause: ${reason ?? "use
     });
     expect(targetCancelled).toBe(1);
     expect(otherCancelled).toBe(0);
-    expect(target.settledOutcome()).toMatchObject({ type: "error", error: { code: reason ?? "client_cancelled", retryable: false } });
+    expect(target.settledOutcome()).toMatchObject({ type: "error", error: { code: "client_cancelled", retryable: false } });
     expect(chatGptTurnSessions.getOrCreate("target-key", () => {
       throw new Error("cancelled trace must remain terminal");
     }, "trace_target")).toBe(target);
   } finally {
     chatGptTurnSessions.clear();
-    await server.stop(true);
-  }
-});
-
-test("authenticated targeted cancellation aborts a shared structured compaction owner", async () => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
-  const server = startServer(config);
-  const handoffTraceId = "a1b2c3d4e5f6";
-  const traceId = `${handoffTraceId}_fallback`;
-  let aborted = false;
-  const run = runStructuredCompactionOnce(
-    `structured-${Date.now()}-${Math.random()}`,
-    { ownerKey: `owner-${traceId}`, traceIds: [handoffTraceId, traceId] },
-    signal => new Promise<string>((_resolve, reject) => {
-      signal.addEventListener("abort", () => {
-        aborted = true;
-        reject(signal.reason);
-      }, { once: true });
-    }),
-  );
-
-  try {
-    await Bun.sleep(0);
-    const response = await fetch(`http://127.0.0.1:${server.port}/admin/cancel-turn`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.controlToken}`,
-      },
-      body: JSON.stringify({ traceId }),
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      status: "ok",
-      trace_id: traceId,
-      cancelled_compaction_runs: 1,
-    });
-    await expect(run).rejects.toThrow("The ChatGPT browser tab was closed");
-    expect(aborted).toBeTrue();
-  } finally {
     await server.stop(true);
   }
 });
@@ -1061,7 +1026,7 @@ test("lifecycle drain and cancellation include browser turns owned by the extern
       sandboxPolicy: { type: "dangerFullAccess" as const },
       tools: [],
     };
-    const token = await remote.register(environment, 60_000, "dev-lifecycle");
+    const token = await remote.register(environment, "dev-lifecycle");
     const waiting = remote.nextToolBatch(token).then(
       () => "resolved",
       error => error instanceof Error ? error.message : String(error),
@@ -1069,7 +1034,7 @@ test("lifecycle drain and cancellation include browser turns owned by the extern
 
     const drain = await fetch(`${endpoint}/admin/drain`, { method: "POST", headers: authorization });
     expect(await drain.json()).toMatchObject({ active_browser_turns: 1, accepting_turns: false });
-    await expect(remote.register(environment, 60_000, "dev-after-drain")).rejects.toThrow("draining");
+    await expect(remote.register(environment, "dev-after-drain")).rejects.toThrow("draining");
 
     const cancel = await fetch(`${endpoint}/admin/cancel-turns`, { method: "POST", headers: authorization });
     expect(await cancel.json()).toMatchObject({
@@ -1255,11 +1220,20 @@ test("standalone native image generation and edits preserve their upstream proto
 
 test("authenticated shutdown requires a verified idle drain", async () => {
   const config = { ...defaultConfig("browser-only"), port: 0 };
-  const server = startServer(config);
-  const endpoint = `http://127.0.0.1:${server.port}`;
-  const authorization = { authorization: `Bearer ${config.controlToken}` };
+  const testDirectory = mkdtempSync(join(tmpdir(), "codex-web-server-shutdown-"));
+  let closeServer: (() => Promise<void>) | undefined;
 
   try {
+    const server = startServer(config, {
+      astraJev: createAstraJevService({
+        settingsStore: new AstraJevSettingsStore(join(testDirectory, "settings")),
+        historyStore: new HistoryStore({ directory: join(testDirectory, "history") }),
+      }),
+    });
+    closeServer = () => server.stop(true);
+    const endpoint = `http://127.0.0.1:${server.port}`;
+    const authorization = { authorization: `Bearer ${config.controlToken}` };
+
     const unauthorized = await fetch(`${endpoint}/admin/shutdown`, {
       method: "POST",
       headers: { authorization: "Bearer invalid" },
@@ -1302,7 +1276,11 @@ test("authenticated shutdown requires a verified idle drain", async () => {
     }
     expect(stopped).toBe(true);
   } finally {
-    await server.stop(true);
+    try {
+      await closeServer?.();
+    } finally {
+      rmSync(testDirectory, { recursive: true, force: true });
+    }
   }
 });
 

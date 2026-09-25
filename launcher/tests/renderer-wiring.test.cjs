@@ -9,6 +9,8 @@ const stylesSource = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
+const typesSource = fs.readFileSync(path.join(launcherRoot, "src", "types.ts"), "utf8");
+const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
 
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {
   assert.match(appSource, /const \[browserSlot, setBrowserSlot\] = useState<HTMLDivElement \| null>\(null\)/);
@@ -22,6 +24,16 @@ test("native clicks reach browser tabs instead of the window drag region", () =>
   assert.match(appSource, /className=\{`app-titlebar\$\{draggable \? " draggable" : ""\}`\}/);
   assert.match(stylesSource, /\.browser-tab\s*\{[^}]*-webkit-app-region:\s*no-drag;/s);
   assert.match(appSource, /className="browser-tab-drag draggable"/);
+});
+
+test("browser tabs have no total-count tooltip", () => {
+  const tabStripStart = appSource.indexOf('<div className="browser-tab-strip"');
+  const toolbarStart = appSource.indexOf('<div className="browser-toolbar">', tabStripStart);
+  const tabStrip = appSource.slice(tabStripStart, toolbarStart);
+  assert.ok(tabStripStart >= 0 && toolbarStart > tabStripStart);
+  assert.doesNotMatch(tabStrip, /title=\{copy\.browserTabLimit\}/);
+  assert.doesNotMatch(typesSource, /maxTabs|maxConcurrentTurns/);
+  assert.doesNotMatch(i18nSource, /browserTabLimit/);
 });
 
 test("renderer zoom scales the shell without moving or zooming the native ChatGPT surface", () => {
@@ -91,7 +103,7 @@ test("setup preserves session-check failures and never installs without verified
     let setup;
     let installs = 0;
     let browser = { authenticated: false, status: "error", message: "ChatGPT session verification failed (HTTP 503)." };
-    const state = { browserInteractionMode: "automatic", coreSetupComplete: false };
+    const state = { coreSetupComplete: false };
     const run = async () => { installs++; return { mode: "browser-only", stdout: "" }; };
     vm.runInNewContext(source, {
       handle: (_name, handler) => { setup = handler; }, IS_DEV_PROFILE: dev,
@@ -195,7 +207,6 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
   assert.match(electronMain, /onboardingComplete:\s*true,[\s\S]*?autoStart:\s*false/);
   assert.match(appSource, /snapshot\.profile === "development"/);
   assert.match(appSource, /data-profile=\{snapshot\.profile\}/);
-  assert.match(appSource, /manualBiggerContextUnavailable[\s\S]*?copy\.biggerContextBody/);
   assert.match(appSource, /api!\.setBiggerContext\(enabled\)/);
   assert.match(electronMain, /runtimeHost\.setBiggerContext\(enabled === true\)/);
   assert.doesNotMatch(electronMain, /IS_DEV_PROFILE && key === "experimentalBiggerContext"/);
@@ -204,7 +215,7 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
 test("macOS passkey sign-in is additive to the unchanged embedded login action", () => {
   assert.match(appSource, /onAction=\{openLogin\}/);
   assert.match(appSource, /<BrowserSurface[\s\S]*?operation=\{operation\}[\s\S]*?platform=\{snapshot\.platform\}/);
-  assert.match(appSource, /const passkeyAvailable = !manualInteraction[\s\S]*?platform === "darwin"[\s\S]*?browser\?\.authenticated !== true/);
+  assert.match(appSource, /const passkeyAvailable = platform === "darwin"[\s\S]*?browser\?\.authenticated !== true/);
   assert.match(appSource, /\{passkeyAvailable \? \([\s\S]*?className="toolbar-text-button"[\s\S]*?copy\.passkeySignIn/);
   assert.match(appSource, /className="browser-empty-actions"[\s\S]*?copy\.passkeySignIn/);
   assert.match(appSource, /passkeyWaiting \? continuePasskeyLogin : openPasskeyLogin/);
@@ -218,7 +229,7 @@ test("macOS passkey sign-in is additive to the unchanged embedded login action",
 test("Bigger Context startup recommendation reuses the persisted setting and setup transaction", () => {
   assert.match(
     appSource,
-    /const \[biggerContextRecommendationOpen, setBiggerContextRecommendationOpen\] = useState\([\s\S]*?snapshot\.state\.browserInteractionMode === "automatic"[\s\S]*?snapshot\.state\.coreSetupComplete === true[\s\S]*?!snapshot\.state\.experimentalBiggerContext,/,
+    /const \[biggerContextRecommendationOpen, setBiggerContextRecommendationOpen\] = useState\([\s\S]*?snapshot\.state\.coreSetupComplete === true[\s\S]*?!snapshot\.state\.experimentalBiggerContext,/,
   );
   assert.match(appSource, /&& !biggerContextRecommendationOpen;/);
   assert.match(appSource, /updateState\(await api!\.setBiggerContext\(enabled\)\)/);
@@ -231,50 +242,12 @@ test("Bigger Context startup recommendation reuses the persisted setting and set
   assert.doesNotMatch(stylesSource, /\.bigger-context-recommendation-backdrop\s*\{[^}]*backdrop-filter:/s);
 });
 
-test("Zero Risk setup commits state after the runtime transaction and preserves manual inspection boundaries", () => {
-  const modeSwitchHandler = electronMain.slice(
-    electronMain.indexOf('handle("launcher:browser-interaction-mode"'),
-    electronMain.indexOf('handle("launcher:set-preference"'),
-  );
-  const modeTransaction = modeSwitchHandler.indexOf("await browserHost.withInteractionModeChange(");
-  const runtimeModeCommit = modeSwitchHandler.indexOf("runtimeHost.setBrowserInteractionMode(mode, afterRuntimeReady)");
-  const stateModeCommit = modeSwitchHandler.indexOf("const state = stateStore.update({");
-  assert.ok(modeTransaction >= 0 && modeTransaction < runtimeModeCommit);
-  assert.ok(runtimeModeCommit < stateModeCommit);
-
-  const mcpSetupHandler = electronMain.slice(
-    electronMain.indexOf('handle("launcher:setup-mcp"'),
-    electronMain.indexOf('handle("launcher:set-mcp-step"'),
-  );
-  const runtimeMcpCommit = mcpSetupHandler.indexOf("const runSetup = afterRuntimeReady => setup({");
-  const mcpTransaction = mcpSetupHandler.indexOf("await browserHost.withInteractionModeChange(interactionMode, runSetup)");
-  const stateMcpCommit = mcpSetupHandler.indexOf("const state = stateStore.update({");
-  assert.ok(runtimeMcpCommit >= 0 && runtimeMcpCommit < mcpTransaction);
-  assert.ok(mcpTransaction < stateMcpCommit);
-  assert.match(browserHostSource, /bindManualTurnContents\(tab\)/);
-  const manualBinding = browserHostSource.slice(
-    browserHostSource.indexOf("bindManualTurnContents(tab)"),
-    browserHostSource.indexOf("bindWebContents()"),
-  );
-  assert.doesNotMatch(manualBinding, /executeJavaScript|insertCSS|querySelector|runBrowserHelperOperation|enableDeviceEmulation/);
-  assert.match(browserHostSource, /requireAutomaticBrowserInspection\(this, "ChatGPT authentication probe"\)/);
-  assert.match(browserHostSource, /requireAutomaticBrowserInspection\(this, "ChatGPT session and capability inspection"\)/);
-  assert.match(browserHostSource, /browserInteractionModeFor\(this\) === "manual"\) return;[\s\S]*?applyViewportCss\(\)/);
-  assert.match(
-    browserHostSource,
-    /page-title-updated[\s\S]*?browserInteractionModeFor\(this\) === "manual"\) return;/,
-  );
-  assert.doesNotMatch(modeSwitchHandler, /const pending = stateStore\.update|catch \(error\)/);
-  assert.match(electronMain, /browserInteractionMode === "manual"[\s\S]*?Local Zero Risk runtime is healthy/);
-
-});
-
 test("MCP connection remains unavailable until the model catalog is verified", () => {
   assert.match(
     appSource,
-    /manualInteraction \|\| configuringInactiveMode \|\| snapshot\.state\.codexCatalogVerified[\s\S]*?copy\.mcpStepTwoHint[\s\S]*?copy\.mcpCatalogRequired/,
+    /snapshot\.state\.codexCatalogVerified[\s\S]*?copy\.mcpStepTwoHint[\s\S]*?copy\.mcpCatalogRequired/,
   );
-  assert.match(appSource, /!manualInteraction && !configuringInactiveMode && !snapshot\.state\.codexCatalogVerified/);
+  assert.match(appSource, /!snapshot\.state\.codexCatalogVerified/);
 });
 
 test("MCP navigation remains locked while an operation is active", () => {
