@@ -190,6 +190,7 @@ export class ChatGptMarkdownBuffer {
   private markdown = "";
   private lastGroup: string | undefined;
   private consistencyError: ChatGptMarkdownConsistencyError | undefined;
+  private revision = 0;
 
   constructor(
     private readonly transform: (markdown: string) => string = markdown => markdown,
@@ -201,6 +202,7 @@ export class ChatGptMarkdownBuffer {
   }
 
   observe(segments: ChatGptMarkdownSegment[], now = Date.now()): string {
+    this.revision += 1;
     const reconciled = this.reconcile(segments);
     if (reconciled instanceof ChatGptMarkdownConsistencyError) {
       this.consistencyError = reconciled;
@@ -236,7 +238,6 @@ export class ChatGptMarkdownBuffer {
       if (!visibleCandidates.has(candidateId)) this.candidates.delete(candidateId);
     }
 
-    let delta = "";
     let committedCount = 0;
     while (committedCount < reconciled.length) {
       const segment = reconciled[committedCount]!;
@@ -244,25 +245,39 @@ export class ChatGptMarkdownBuffer {
       const candidate = this.candidates.get(candidateId);
       if (!candidate?.streamable || candidate.streamableAt === undefined) break;
       if (now - Math.max(candidate.changedAt, candidate.streamableAt) < this.stabilityMs) break;
-      delta += this.commit(candidate);
-      this.committed.push(this.committedSegment(candidate));
-      this.candidates.delete(candidateId);
       committedCount += 1;
     }
+    // Convert the complete batch before advancing the streamed ledger. A
+    // serializer failure in a later block must not swallow an earlier delta.
+    const ready = reconciled.slice(0, committedCount);
+    const append = this.prepareAppend(ready);
+    this.applyAppend(append);
+    for (const segment of ready) this.candidates.delete(this.candidateId(segment));
     this.latest = this.latest.slice(committedCount);
-    return delta;
+    return append.delta;
   }
 
   finish(): { markdown: string; delta: string } {
+    const prepared = this.prepareFinish();
+    prepared.commit();
+    return { markdown: prepared.markdown, delta: prepared.delta };
+  }
+
+  /** Encode before sealing an external completion fence; discard on a stale fence. */
+  prepareFinish(): { readonly markdown: string; readonly delta: string; commit(): void } {
     if (this.consistencyError) throw this.consistencyError;
-    let delta = "";
-    for (const segment of this.latest) {
-      delta += this.commit(segment);
-      this.committed.push(this.committedSegment(segment));
-    }
-    this.candidates.clear();
-    this.latest = [];
-    return { markdown: this.markdown, delta };
+    const revision = this.revision;
+    const append = this.prepareAppend(this.latest);
+    let committed = false;
+    return Object.freeze({ markdown: append.markdown, delta: append.delta, commit: () => {
+      if (committed) return;
+      if (this.revision !== revision) throw new Error("Cannot commit an obsolete Markdown observation");
+      this.applyAppend(append);
+      this.candidates.clear();
+      this.latest = [];
+      this.revision += 1;
+      committed = true;
+    } });
   }
 
   currentSnapshotIsConsistent(): boolean {
@@ -393,15 +408,30 @@ export class ChatGptMarkdownBuffer {
     );
   }
 
-  private commit(segment: ChatGptMarkdownSegment): string {
-    const block = this.transform(chatGptHtmlToMarkdown(segment.html));
-    if (!block) return "";
-    const separator = this.markdown
-      ? segment.group !== undefined && segment.group === this.lastGroup ? "\n" : "\n\n"
-      : "";
-    const delta = `${separator}${block}`;
-    this.markdown += delta;
-    this.lastGroup = segment.group;
-    return delta;
+  private prepareAppend(segments: readonly ChatGptMarkdownSegment[]) {
+    let markdown = this.markdown;
+    let lastGroup = this.lastGroup;
+    let delta = "";
+    const committed: CommittedChatGptMarkdownSegment[] = [];
+    for (const segment of segments) {
+      const block = this.transform(chatGptHtmlToMarkdown(segment.html));
+      if (block) {
+        const separator = markdown
+          ? segment.group !== undefined && segment.group === lastGroup ? "\n" : "\n\n"
+          : "";
+        const addition = `${separator}${block}`;
+        markdown += addition;
+        delta += addition;
+        lastGroup = segment.group;
+      }
+      committed.push(this.committedSegment(segment));
+    }
+    return { markdown, lastGroup, delta, committed };
+  }
+
+  private applyAppend(append: ReturnType<ChatGptMarkdownBuffer["prepareAppend"]>): void {
+    this.markdown = append.markdown;
+    this.lastGroup = append.lastGroup;
+    for (const segment of append.committed) this.committed.push(segment);
   }
 }

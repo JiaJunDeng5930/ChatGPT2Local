@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { SubmissionJournal, SubmissionOutcomeUnknownError } from "../../verified/submission-journal";
 import { VerifiedCompletionObserver, hasCompletionEvidence } from "../../verified/observation";
 import { checkPageHistory, markPageHistory } from "../../verified/page-history";
+import { commitChatGptCompletion } from "./completion-publication";
 import { canonicalJson, digest } from "../../verified/web-history";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page, type Request, type Response } from "playwright-core";
@@ -4817,13 +4818,13 @@ export class ChatGptBrowserWorker {
           const completionReady = completionTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
-        currentText: snapshot.visibleText,
+            currentText: snapshot.visibleText,
             currentHtml: snapshot.fullHtml,
             completionActionVisible: snapshot.completionActionVisible,
             replyErrorVisible: snapshot.replyErrorVisible,
             stoppedThinkingVisible: snapshot.stoppedThinkingVisible,
             externalToolCallsInFlight,
-      });
+          });
           if (!completionReady) completionFenceRevision = undefined;
           if (completionReady) {
             if (turn.completionFence) {
@@ -4842,26 +4843,21 @@ export class ChatGptBrowserWorker {
                 await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
                 continue;
               }
-              if (!await turn.completionFence.commit(completionFenceRevision)) {
-                completionFenceRevision = undefined;
-                responseDomCache.key = undefined;
-                responseDomCache.snapshot = undefined;
-                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
-                continue;
-              }
             }
-            if (snapshot.visibleText === "api_tool unavailable") {
-              throw new Error("ChatGPT selected mode rejected the Codex Native MCP tool (api_tool unavailable)");
-            }
-            const final = (() => {
+            const final = await (async () => {
               try {
-                return markdownBuffer.finish();
+                return await commitChatGptCompletion(markdownBuffer, snapshot.visibleText,
+                  turn.completionFence ? () => turn.completionFence!.commit(completionFenceRevision!) : undefined);
               } catch (error) {
                 return throwMarkdownConsistencyError(error);
               }
             })();
-            if (!final.markdown && snapshot.visibleText) {
-              throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
+            if (!final) {
+              completionFenceRevision = undefined;
+              responseDomCache.key = undefined;
+              responseDomCache.snapshot = undefined;
+              await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+              continue;
             }
             if (final.delta) emitMarkdownDelta(final.delta);
             finalText = final.markdown;
