@@ -1,4 +1,12 @@
 # Portable proof receipts compare actual bytes across the CI platform matrix.
 bend/** text eol=lf
-src/verified/** text eol=lf
-scripts/*bend* text eol=lf
+src/** text eol=lf
+launcher/electron/** text eol=lf
+launcher/src/** text eol=lf
+launcher/scripts/** text eol=lf
+scripts/** text eol=lf
+package.json text eol=lf
+bun.lock text eol=lf
+launcher/package.json text eol=lf
+launcher/bun.lock text eol=lf
+.gitattributes text eol=lf

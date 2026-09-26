@@ -7,6 +7,16 @@ flows are exercised manually on the platforms below.
 
 ## Required evidence
 
+The automated prerequisite is `bun run verify`. It includes the assembled Bend
+proof root, strict purity rejection probes, well-typed semantic mutations, native
+and JavaScript ABI conformance, both application test suites and relocated runtime
+packaging smoke. The exact-source receipt also covers production effect hosts;
+an earlier receipt is not valid after a browser or launcher change. See
+[Verified browser execution](verified-runtime.md) for the boundary assumptions.
+
+These checks make no ChatGPT generation requests. They neither replace the live
+account checks below nor authorize restarting a user's active runtime to run them.
+
 Record the release version, operating-system version, install path (`clean` or `upgrade`), ChatGPT
 plan, Codex version, result of each check, and a redacted Activity log for every failure. Never
 capture cookies, tunnel IDs, API keys, bearer tokens, or prompt contents.

@@ -1,6 +1,5 @@
-import { cpSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { defaultBrokerEndpoint } from "../src/config";
 import { VERSION } from "../src/version";
@@ -15,7 +14,12 @@ const { validateRuntimeBundle } = require("../launcher/electron/runtime-install.
 
 const sourceBundle = resolve(process.argv[2] ?? "dist/runtime");
 const sourceRoot = resolve(import.meta.dir, "..");
-const root = join(homedir(), `.codex-chatgpt-web-release-smoke-${process.pid}-${Date.now()}`);
+// Use an isolated disposable workspace without writing to the real user home.
+// Keep it outside OS temporary roots: the production installation contract
+// correctly rejects executable paths that the OS may delete after a reboot.
+const scratchParent = resolve(process.env.CODEX_WEB_RELEASE_SMOKE_ROOT ?? join(sourceRoot, ".cache"));
+mkdirSync(scratchParent, { recursive: true });
+const root = mkdtempSync(join(scratchParent, "release-smoke-"));
 const firstLocation = join(root, "first-location");
 const runtimeRoot = join(root, "relocated-runtime");
 cpSync(sourceBundle, firstLocation, { recursive: true, verbatimSymlinks: true });
@@ -86,18 +90,26 @@ writeFileSync(config.storageStatePath, "{}\n", { mode: 0o600 });
 
 const env = { ...process.env, CODEX_CHATGPT_WEB_HOME: appHome, CODEX_HOME: codexHome };
 const child = Bun.spawn([...runtimeCommand, "serve"], { env, stdout: "pipe", stderr: "pipe" });
+const childOutput = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
 let stoppedGracefully = false;
 try {
   const deadline = Date.now() + 10_000;
   let health: Response | undefined;
   while (Date.now() < deadline) {
+    if (child.exitCode !== null) break;
     try {
       health = await fetch(`http://127.0.0.1:${port}/healthz`);
       if (health.ok) break;
     } catch {}
     await Bun.sleep(50);
   }
-  if (!health?.ok) throw new Error("relocated daemon did not become healthy");
+  if (!health?.ok) {
+    if (child.exitCode !== null) {
+      const [stdout, stderr] = await childOutput;
+      throw new Error(`relocated daemon exited before becoming healthy (${child.exitCode}): ${stderr || stdout}`);
+    }
+    throw new Error("relocated daemon did not become healthy");
+  }
   const payload = await health.json() as Record<string, unknown>;
   if (payload.service !== "codex-chatgpt-web" || payload.mode !== "browser-only") {
     throw new Error(`unexpected health payload: ${JSON.stringify(payload)}`);
@@ -174,8 +186,9 @@ try {
   process.stdout.write("RELOCATABLE_RUNTIME_SMOKE_OK\n");
 } finally {
   if (!stoppedGracefully) {
-    child.kill("SIGTERM");
+    if (child.exitCode === null) child.kill("SIGTERM");
     await child.exited;
   }
+  await childOutput;
   rmSync(root, { recursive: true, force: true });
 }

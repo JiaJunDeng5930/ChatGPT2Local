@@ -30,8 +30,9 @@ work went into it.
   tunnel. Browser-only mode must not create a broker capability or attach an MCP connector.
 - Every available ChatGPT Web effort has the same turn-bound MCP capability in Full mode. Do not
   add effort-specific MCP exclusions.
-- Preserve fail-closed behavior. A selector or protocol failure must return an explicit error, not
-  pick another option or claim success.
+- Preserve fail-closed behavior. A selector or protocol failure must never pick another option
+  or claim success. An uncertain webpage observation is not cancellation or retry authority:
+  retain the page and operation evidence rather than stopping, reloading or resending.
 - Never commit browser state, cookies, API keys, tunnel IDs, Codex history, generated logs, or
   absolute user paths.
 
@@ -52,3 +53,21 @@ Launcher changes must preserve native packaging on macOS, Windows, and Linux. Pl
 must be built on their matching operating system. See [DEV chat mode](docs/dev-chat.md) for isolated
 browser and MCP development, and [release validation](docs/release-validation.md) for the required
 account-bound release checks.
+
+## Bend runtime changes
+
+Read [Verified browser execution](docs/verified-runtime.md) before changing execution,
+history, tool obligations or page ownership. Change the independent specification,
+implementation and real proof binding together. Keep those policies in Bend; host
+adapters should interpret decisions rather than create alternative lifecycles.
+
+After editing pure sources, run `bun run bend:build` and commit the regenerated
+`src/verified/generated/core.cjs`. `bun run verify` rejects a stale artifact and
+runs actual pure/native verification, proof-gate probes and semantic mutants before
+packaging. A passing TypeScript suite alone is not evidence that the current Bend
+sources generated the current runtime.
+
+Use regression tests for concrete foreign boundaries: a lost send response, partial
+receipt, conflicting page witness, serializer failure or real process protocol.
+Do not label a syntax error as a killed semantic mutant, an imported build receipt
+as a proof of host code, or local fixtures as live account-bound acceptance.

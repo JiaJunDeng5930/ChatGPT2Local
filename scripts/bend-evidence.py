@@ -15,19 +15,33 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ["build-bend-core.py", "verify-bend.py", "check-bend-conformance.py",
-           "bend-evidence.py", "setup-bend.py", "verify-bend-build.ts"]
+           "bend-evidence.py", "setup-bend.py", "verify-bend-build.ts",
+           "build-runtime-bundle.ts", "build-browser-helper.ts", "smoke-release.ts", "verify.ts"]
+BINDINGS = ["src/adapters/chatgpt-web/browser-worker.ts", "src/adapters/chatgpt-web/index.ts",
+            "src/adapters/chatgpt-web/turn-broker.ts", "src/adapters/chatgpt-web/turn-execution.ts",
+            "src/adapters/chatgpt-web/completion-publication.ts",
+            "launcher/electron/browser-host.cjs", "launcher/electron/verified-core.cjs",
+            "launcher/scripts/prepare-runtime.cjs", "launcher/scripts/package.cjs"]
 CI_KEYS = ["GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]
 
 
 def inputs() -> dict[str, str]:
     required = [ROOT / "bend/PROOF.bend", ROOT / "bend/api.bend", ROOT / "bend/toolchain.json",
                 ROOT / "src/verified/generated/core.cjs", ROOT / "src/verified/generated/core.d.cts",
-                *(ROOT / "scripts" / name for name in SCRIPTS)]
+                *(ROOT / "scripts" / name for name in SCRIPTS), *(ROOT / name for name in BINDINGS)]
     if any(not path.is_file() for path in required):
         raise RuntimeError("Missing required Bend proof/build inputs")
     files = set((ROOT / "bend").rglob("*.bend"))
     files.add(ROOT / "bend/toolchain.json")
-    files.update((ROOT / "src/verified").rglob("*.ts"))
+    # A proof about the generated kernel is not evidence about a different
+    # interpreter. Bind exact production callers, browser/launcher effects,
+    # codecs and resource-packaging scripts as well as the pure artifact.
+    for directory in ["src", "launcher/electron", "launcher/src", "launcher/scripts"]:
+        files.update(path for path in (ROOT / directory).rglob("*")
+                     if path.is_file() and path.suffix in (".ts", ".tsx", ".cjs", ".js", ".json"))
+    files.update((ROOT / "scripts/tests").glob("*.py"))
+    files.update(path for name in ["package.json", "bun.lock", "launcher/package.json", "launcher/bun.lock", ".gitattributes"]
+                 if (path := ROOT / name).is_file())
     files.update(ROOT / "src/verified/generated" / name for name in ["core.cjs", "core.d.cts"])
     files.update(ROOT / "scripts" / name for name in SCRIPTS)
     if not files or not (ROOT / "bend/PROOF.bend").is_file():
@@ -61,6 +75,10 @@ def check(path: Path) -> dict:
     conformance = receipt.get("conformance", {})
     if receipt.get("proof") != "All terms check." or validation.get("native_checked") is not True:
         raise RuntimeError("Bend receipt is missing pure/native verification")
+    probes = validation.get("proof_gate_probes", [])
+    required_probes = {"missing-proof", "false-proof", "proof-hole", "unchecked-proof", "circular-proof"}
+    if {item.get("probe") for item in probes} != required_probes or any(item.get("gate") != "rejected" for item in probes):
+        raise RuntimeError("Bend receipt is missing proof-gate rejection evidence")
     mutations = validation.get("mutations", [])
     if not mutations or any(item.get("runtime") != "pure/type-correct" or item.get("proof") != "rejected equality/type mismatch" for item in mutations):
         raise RuntimeError("Bend receipt is missing semantic mutation evidence")

@@ -17,6 +17,12 @@ launcher-owned codex-chatgpt-web daemon
       ChatGPT custom connector
 ```
 
+Application execution decisions live in a Bend 2 pure core checked against
+independent specifications and emitted into the shared daemon/launcher library.
+Browser, persistence and process effects remain explicit host boundaries. See
+[Verified browser execution](verified-runtime.md) for the concept map, production
+proof bindings, recovery rules and limits of the guarantees.
+
 ## Modes
 
 ### `browser-only`
@@ -24,7 +30,9 @@ launcher-owned codex-chatgpt-web daemon
 - Exposes Instant (`chatgpt-web/light`), Medium, High, and Extra High; each model advertises exactly one
   immutable Codex effort matching its ChatGPT browser mode. `chatgpt-web/pro` is appended only when
   the authenticated account exposes Pro.
-- Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat.
+- Imports the complete Codex context and image attachments for a new conversation.
+  A confirmed compatible retained conversation receives only the new suffix;
+  a conversation ID alone never authorizes reuse.
 - Never starts the broker, tunnel, or MCP server.
 - Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected model.
 
@@ -113,6 +121,11 @@ Browser submission and response binding use ChatGPT's logical `data-turn-id`, no
 includes the persistent `data-turn-id-container` wrappers of virtualized history. Remounting old
 messages therefore cannot count as a new submission or another user's turn. Missing or duplicate
 logical identities fail explicitly; accepted messages are never resent to repair their DOM.
+
+The same non-intervention rule applies to the home and sign-in surfaces: a security
+check response or navigation deadline only reports uncertainty. Neither stops,
+reloads nor closes a potentially healthy document. Explicit user navigation and
+refresh remain separate commands, not automatic error recovery.
 
 Sign-in uses that same persistent Electron partition. ChatGPT login pages and allowed identity-
 provider popups are adopted into a temporary `WebContentsView` inside the launcher instead of being

@@ -36,6 +36,16 @@ MUTATIONS = [
      "case D.Detach{}: D.Decision{D.Cancelled{}, D.StopByUser{}}"),
     ("accept-a-divergent-history", "history.bend",
      "case False{} _: None{}", "case False{} _: Some{0n}"),
+    ("reuse-history-from-a-different-environment", "history.bend",
+     "case False{}: None{}", "case False{}: prefix"),
+    ("select-an-empty-history-prefix", "history.bend",
+     "Bool.and(Nat.is_gt(n, 0n), Nat.is_lt(n, length))",
+     "Nat.is_lt(n, length)"),
+    ("select-a-shorter-history-receipt", "history.bend",
+     "Bool.or(Nat.is_gt(na, nb), Bool.and(Nat.is_eq(na, nb), String.is_le(ka, kb)))",
+     "Bool.or(Nat.is_lt(na, nb), Bool.and(Nat.is_eq(na, nb), String.is_le(ka, kb)))"),
+    ("credit-an-unsent-developer-message", "transcript.bend",
+     'String.eq(role, "assistant")', 'String.eq(role, "developer")'),
     ("finish-before-the-final-payload", "batch.bend",
      "B.BatchDecision{B.Batch{phase, slot, current, Con{h, t}}, D.Reject{}}",
      "B.BatchDecision{B.Batch{D.Completed{}, slot, current, Con{h, t}}, D.PublishFinal{}}"),
@@ -82,6 +92,36 @@ def compiler() -> str:
 def invoke(entry: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run([compiler(), str(entry), "--check-only"], cwd=ROOT,
                           text=True, capture_output=True, timeout=120)
+
+
+def proof_gate_probes() -> list[dict[str, str]]:
+    """Challenge the compiler's purity protocol separately from semantic mutants."""
+    probes = [
+        ("missing-proof", "law witness:\n  for n: Nat\n  {n == n : Nat}\n", "TODO found"),
+        ("false-proof", "def witness(n: Nat) -> {0n == 1n : Nat}: {==}\n", "expected"),
+        ("proof-hole", "def witness(n: Nat) -> {n == n : Nat}: ?TODO\n", "TODO found"),
+        ("unchecked-proof", "@unsafe def witness(n: Nat) -> {0n == 1n : Nat}: witness(n)\n", "unsafe or foreign"),
+        ("circular-proof", "def witness(n: Nat) -> {0n == 1n : Nat}: witness(n)\n", "decreasing self-call"),
+    ]
+    records = []
+    with tempfile.TemporaryDirectory(prefix="proof-gate-", dir=ROOT / ".cache/bend") as temporary:
+        entry = Path(temporary) / "probe.bend"
+        entry.write_text("import Base\ndef witness(n: Nat) -> {n == n : Nat}: {==}\n")
+        positive = invoke(entry)
+        if positive.returncode != 0 or positive.stderr or positive.stdout.strip() != "All terms check.":
+            raise RuntimeError("The positive proof-gate control did not pass")
+        for name, source, diagnostic in probes:
+            entry.write_text("import Base\n" + source)
+            result = invoke(entry)
+            text = result.stdout + result.stderr
+            accepted = result.returncode == 0 and not result.stderr and result.stdout.strip() == "All terms check."
+            if accepted or diagnostic not in text:
+                raise RuntimeError(f"Proof-gate probe did not fail for the intended reason: {name}\n{text}")
+            # Unchecked recursion returns exit 0 in the pinned compiler. A
+            # successful exit alone must never count as proof evidence.
+            records.append({"probe": name, "gate": "rejected"})
+            print(f"PASS proof-gate probe: {name}")
+    return records
 
 
 def mutants() -> list[dict[str, str]]:
@@ -154,18 +194,24 @@ def main() -> None:
         checked = evidence.check(options.receipt)
         print(f"Reused trusted Bend proof/native evidence for exact inputs: {checked['fingerprint']}")
         return
+    # Fail missing inputs before compilation, and never bind evidence to source
+    # bytes that changed while the checks were running.
+    checked_inputs = evidence.inputs()
     subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests", "-v"], cwd=ROOT, check=True)
     build.build(check=True, native=not options.no_native)
+    probes = proof_gate_probes()
     mutations = mutants()
     cases = 0 if options.no_native else native_differential()
     receipt = {"source_fingerprint": (ROOT / "src/verified/generated/core.cjs").read_text().splitlines()[0],
-               "mutations": mutations, "native_complete_decisions": cases,
+               "mutations": mutations, "proof_gate_probes": probes, "native_complete_decisions": cases,
                "native_checked": not options.no_native}
     (ROOT / ".cache/bend/validation.json").write_text(json.dumps(receipt, indent=2) + "\n")
     if not options.no_native:
         # Checking only the small turn-state CLI does not establish the ABI of
         # history, broker, progress, output replay or launcher lease decisions.
         conformance = module("bend_conformance", "check-bend-conformance.py").check()
+        if evidence.inputs() != checked_inputs:
+            raise RuntimeError("Bend proof/build inputs changed while verification was running")
         evidence.write(options.write_receipt, receipt, conformance)
         evidence.check(options.write_receipt)
         print(f"Wrote complete Bend verification evidence: {options.write_receipt}")
