@@ -3,6 +3,8 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { isWindowsPipeEndpoint } from "../../config";
+import { VerifiedBroker, brokerIds, brokerRevision, type BrokerEffect } from "../../verified/broker";
+import { canonicalJson, digest } from "../../verified/encoding";
 import type { ChatGptTurnEnvironment } from "./environment";
 
 type PendingTurn = ChatGptTurnEnvironment;
@@ -47,18 +49,11 @@ interface TurnChannel {
   externalOwner: boolean;
   environment: PendingTurn;
   bindingId?: string;
-  queuedCallIds: string[];
-  deliveredCallIds: Set<string>;
+  /** All admission, delivery, receipt and completion decisions belong to Bend. */
+  owner: VerifiedBroker;
+  /** Host resources only: promises and the request bytes named by the core. */
   invocations: Map<string, PendingInvocation>;
   waiters: Set<ToolWaiter>;
-  /** Every MCP request owns a lease from token claim until its handler has settled. */
-  activities: Set<string>;
-  /** Prevents a lost/retried or delayed claim from resurrecting activity after cleanup. */
-  completedActivities: Set<string>;
-  /** Monotonic across activity start/end so a completed request cannot disappear across a fence. */
-  activityRevision: number;
-  completionCommitted: boolean;
-  completionRevision?: number;
   retirementWaiters: Set<BrokerWaiter<void>>;
   batchTimer?: ReturnType<typeof setTimeout>;
 }
@@ -132,12 +127,25 @@ function retiredTurnLabel(traceId: string): string {
 }
 
 function environmentIdentity(environment: ChatGptTurnEnvironment): string {
-  return JSON.stringify({
+  return canonicalJson({
     cwd: environment.cwd,
     roots: environment.roots,
     writableRoots: environment.writableRoots,
     sandboxPolicy: environment.sandboxPolicy,
   });
+}
+
+function brokerFailure(effect: BrokerEffect, callId?: string): Error {
+  if (effect.$ !== "Reject") return new Error(`Unexpected Bend broker effect: ${effect.$}`);
+  switch (effect.reason.$) {
+    case "OwnerClosed": return new Error("This Codex turn has already finished; no new native action can run.");
+    case "ActivityAlreadyCompleted": return new Error("turn activity was already completed before this claim settled");
+    case "DuplicateInvocation": return new Error(`tool invocation identity was already used: ${callId ?? "unknown"}`);
+    case "CallNotPending": return new Error(`tool call is not pending: ${callId ?? "unknown"}`);
+    case "CallNotDelivered": return new Error(`tool call was completed before it was delivered: ${callId ?? "unknown"}`);
+    case "ConflictingResult": return new Error(`tool call received a conflicting result: ${callId ?? "unknown"}`);
+    case "EnvironmentChanged": return new Error("Codex turn environment changed during an active ChatGPT tool loop");
+  }
 }
 
 function ownerEnvironment(value: unknown): ChatGptTurnEnvironment {
@@ -227,15 +235,10 @@ export class TurnBroker implements TurnBrokerOwner {
     const channel: TurnChannel = {
       traceId,
       externalOwner,
-      environment: { ...environment },
-      queuedCallIds: [],
-      deliveredCallIds: new Set(),
+      environment: structuredClone(environment),
+      owner: new VerifiedBroker(environmentIdentity(environment)),
       invocations: new Map(),
       waiters: new Set(),
-      activities: new Set(),
-      completedActivities: new Set(),
-      activityRevision: 0,
-      completionCommitted: false,
       retirementWaiters: new Set(),
     };
     this.channels.set(token, channel);
@@ -247,31 +250,17 @@ export class TurnBroker implements TurnBrokerOwner {
   updateEnvironment(token: string, environment: ChatGptTurnEnvironment): void {
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
-    if (environmentIdentity(channel.environment) !== environmentIdentity(environment)) {
-      throw new Error("Codex turn environment changed during an active ChatGPT tool loop");
-    }
-    channel.environment = { ...environment };
+    const effect = channel.owner.dispatch({ $: "CheckEnvironment", environment: environmentIdentity(environment) });
+    if (effect.$ !== "EnvironmentAccepted") throw brokerFailure(effect);
+    channel.environment = structuredClone(environment);
   }
 
   async nextToolBatch(token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]> {
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
-    // Delivery is at-least-once until Codex returns the corresponding tool result. If the HTTP
-    // observer disconnects after the broker handed off a batch but before the adapter journaled
-    // it, the exact reconnect receives the same call ids instead of losing the model's invocation.
-    const delivered = [...channel.deliveredCallIds]
-      .map(id => channel.invocations.get(id)?.request)
-      .filter((request): request is BrokerToolRequest => Boolean(request));
-    if (delivered.length > 0) {
-      this.logToolDelivery(channel, delivered, "replay");
-      return delivered;
-    }
-    const ready = this.takeQueued(channel);
-    if (ready.length > 0) {
-      this.logToolDelivery(channel, ready, "immediate");
-      return ready;
-    }
     if (signal?.aborted) throw new DOMException("tool wait aborted", "AbortError");
+    const ready = this.pollTools(channel, "immediate");
+    if (ready.length > 0) return ready;
     return new Promise<BrokerToolRequest[]>((resolveWait, rejectWait) => {
       const waiter: ToolWaiter = { resolve: resolveWait, reject: rejectWait, ...(signal ? { signal } : {}) };
       if (signal) {
@@ -288,22 +277,27 @@ export class TurnBroker implements TurnBrokerOwner {
   completeTool(token: string, callId: string, result: BrokerToolResult): void {
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
+    // Canonicalize before consuming the receipt. Invalid foreign output cannot
+    // advance the core and then fail serialization. Retain the digest in Bend so
+    // a lost owner_complete acknowledgement can be replayed without reexecution.
+    const effect = channel.owner.dispatch({ $: "CompleteCall", id: callId, digest: digest(canonicalJson(result)) });
+    if (effect.$ === "ResultReplayed") return;
+    if (effect.$ !== "ResultAccepted") throw brokerFailure(effect, callId);
     const invocation = channel.invocations.get(callId);
-    if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
-    if (!channel.deliveredCallIds.delete(callId)) {
-      throw new Error(`tool call was completed before it was delivered: ${callId}`);
-    }
+    if (!invocation) throw new Error(`Missing host resource for accepted tool receipt: ${callId}`);
     channel.invocations.delete(callId);
     console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
+    this.scheduleToolWaiters(channel);
   }
 
   beginCompletionFence(token: string): number | undefined {
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
-    if (channel.completionCommitted) return channel.completionRevision;
-    if (channel.activities.size > 0 || channel.invocations.size > 0) return undefined;
-    return channel.activityRevision;
+    const effect = channel.owner.dispatch({ $: "BeginFence" });
+    if (effect.$ === "FenceUnavailable") return undefined;
+    if (effect.$ !== "FenceOffered") throw brokerFailure(effect);
+    return brokerRevision(effect.revision);
   }
 
   commitCompletionFence(token: string, revision: number): boolean {
@@ -312,12 +306,9 @@ export class TurnBroker implements TurnBrokerOwner {
     }
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
-    if (channel.completionCommitted) return channel.completionRevision === revision;
-    if (channel.activityRevision !== revision
-      || channel.activities.size > 0
-      || channel.invocations.size > 0) return false;
-    channel.completionCommitted = true;
-    channel.completionRevision = revision;
+    const effect = channel.owner.dispatch({ $: "CommitFence", revision: BigInt(revision) });
+    if (effect.$ === "FenceStale") return false;
+    if (effect.$ !== "FenceCommitted") throw brokerFailure(effect);
     console.info(
       `[chatgpt-web] broker trace=${channel.traceId} committed browser completion revision=${revision}`,
     );
@@ -333,6 +324,8 @@ export class TurnBroker implements TurnBrokerOwner {
   revoke(token: string, reason = new Error("Codex turn binding was revoked")): void {
     const channel = this.channels.get(token);
     if (!channel) return;
+    const effect = channel.owner.dispatch({ $: "Retire" });
+    if (effect.$ !== "OwnerRetired" && effect.$ !== "RetirementReplayed") throw brokerFailure(effect);
     this.channels.delete(token);
     this.pending.delete(token);
     if (channel.bindingId) {
@@ -623,13 +616,8 @@ export class TurnBroker implements TurnBrokerOwner {
         throw new Error("turn token is required");
       }
       const channel = this.channels.get(token);
-      const activeChannel = channel && !channel.completionCommitted ? channel : undefined;
-      const retiredTurn = channel?.completionCommitted ? channel.traceId : this.retiredTokens.get(token);
-      console.error(
-        `[chatgpt-web] broker claim received (tokenChars=${token.length}, tokenHash=${handleFingerprint(token)}, valid=${Boolean(activeChannel)}`
-        + `${activeChannel ? "" : `, retiredTurn=${retiredTurn ?? "unknown"}`})`,
-      );
-      if (!activeChannel) {
+      const retiredTurn = this.retiredTokens.get(token);
+      if (!channel) {
         throw new Error(retiredTurn !== undefined
           ? `This turn_token was issued for ${retiredTurnLabel(retiredTurn)}, which has already finished.`
           + " This Codex Native action can no longer run."
@@ -639,13 +627,14 @@ export class TurnBroker implements TurnBrokerOwner {
         throw new Error("turn activity id is invalid");
       }
       const activityId = request.activityId;
-      if (activeChannel.completedActivities.has(activityId)) {
-        throw new Error("turn activity was already completed before this claim settled");
+      const effect = channel.owner.dispatch({ $: "ClaimActivity", id: activityId });
+      if (effect.$ === "Reject" && effect.reason.$ === "OwnerClosed") {
+        throw new Error(`This turn_token was issued for ${retiredTurnLabel(channel.traceId)}, which has already finished.`
+          + " This Codex Native action can no longer run.");
       }
-      if (!activeChannel.activities.has(activityId)) {
-        activeChannel.activities.add(activityId);
-        activeChannel.activityRevision += 1;
-      }
+      if (effect.$ !== "ActivityClaimed" && effect.$ !== "ActivityReplayed") throw brokerFailure(effect);
+      const activeChannel = channel;
+      console.error(`[chatgpt-web] broker claim received (tokenChars=${token.length}, tokenHash=${handleFingerprint(token)}, valid=true)`);
       if (activeChannel.bindingId) {
         const existing = this.bindings.get(activeChannel.bindingId);
         if (!existing || existing.token !== token || existing.channel !== activeChannel) {
@@ -671,15 +660,11 @@ export class TurnBroker implements TurnBrokerOwner {
       if (!channel) {
         return { completed: false, retired: this.retiredTokens.has(token) };
       }
-      if (channel.completedActivities.has(request.activityId)) {
-        return { completed: false, duplicate: true };
-      }
-      const wasActive = channel.activities.delete(request.activityId);
-      channel.completedActivities.add(request.activityId);
-      // A cleanup that overtakes an ambiguously delivered claim is still a causal event. Its
-      // tombstone makes the delayed claim fail instead of resurrecting activity after a fence.
-      channel.activityRevision += 1;
-      return { completed: wasActive };
+      const effect = channel.owner.dispatch({ $: "CompleteActivity", id: request.activityId });
+      if (effect.$ === "ActivityReceiptReplayed") return { completed: false, duplicate: true };
+      if (effect.$ === "LateActivityReceipt") return { completed: false, retired: true };
+      if (effect.$ !== "ActivityClosed") throw brokerFailure(effect);
+      return { completed: effect.was_active };
     }
 
     if (typeof bindingId !== "string" || bindingId.length === 0) throw new Error("binding id is required");
@@ -712,8 +697,9 @@ export class TurnBroker implements TurnBrokerOwner {
       ...(request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} }),
     };
     return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
+      const effect = binding.channel.owner.dispatch({ $: "Enqueue", id: callId, payload: digest(canonicalJson(toolRequest)) });
+      if (effect.$ !== "InvocationQueued") throw brokerFailure(effect, callId);
       binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
-      binding.channel.queuedCallIds.push(callId);
       console.info(
         `[chatgpt-web] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
       );
@@ -721,12 +707,18 @@ export class TurnBroker implements TurnBrokerOwner {
     });
   }
 
-  private takeQueued(channel: TurnChannel): BrokerToolRequest[] {
-    const ids = channel.queuedCallIds.splice(0);
-    for (const id of ids) {
-      if (channel.invocations.has(id)) channel.deliveredCallIds.add(id);
-    }
-    return ids.map(id => channel.invocations.get(id)?.request).filter((request): request is BrokerToolRequest => Boolean(request));
+  private pollTools(channel: TurnChannel, path: "immediate" | "waiter"): BrokerToolRequest[] {
+    const effect = channel.owner.dispatch({ $: "Poll" });
+    if (effect.$ === "WaitForCalls") return [];
+    if (effect.$ !== "CallsDelivered" && effect.$ !== "CallsReplayed") throw brokerFailure(effect);
+    const requests = brokerIds(effect.ids).map(id => {
+      const invocation = channel.invocations.get(id);
+      if (!invocation) throw new Error(`Missing host resource for authorized tool delivery: ${id}`);
+      // A local observer cannot mutate the authoritative request for a replay.
+      return structuredClone(invocation.request);
+    });
+    this.logToolDelivery(channel, requests, effect.$ === "CallsReplayed" ? "replay" : path);
+    return requests;
   }
 
   private logToolDelivery(channel: TurnChannel, batch: BrokerToolRequest[], path: "immediate" | "waiter" | "replay"): void {
@@ -738,7 +730,7 @@ export class TurnBroker implements TurnBrokerOwner {
   }
 
   private scheduleToolWaiters(channel: TurnChannel): void {
-    if (channel.queuedCallIds.length === 0 || channel.waiters.size === 0) return;
+    if (channel.waiters.size === 0) return;
     if (channel.batchTimer) return;
     channel.batchTimer = setTimeout(() => {
       channel.batchTimer = undefined;
@@ -747,9 +739,19 @@ export class TurnBroker implements TurnBrokerOwner {
   }
 
   private wakeToolWaiters(channel: TurnChannel): void {
-    if (channel.queuedCallIds.length === 0 || channel.waiters.size === 0) return;
-    const batch = this.takeQueued(channel);
-    this.logToolDelivery(channel, batch, "waiter");
+    if (channel.waiters.size === 0) return;
+    let batch: BrokerToolRequest[];
+    try {
+      batch = this.pollTools(channel, "waiter");
+    } catch (error) {
+      for (const waiter of channel.waiters) {
+        if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+        waiter.reject(errorOf(error));
+      }
+      channel.waiters.clear();
+      return;
+    }
+    if (batch.length === 0) return;
     const waiters = [...channel.waiters];
     channel.waiters.clear();
     const first = waiters.shift();
@@ -773,8 +775,6 @@ export class TurnBroker implements TurnBrokerOwner {
     channel.waiters.clear();
     for (const invocation of channel.invocations.values()) invocation.reject(error);
     channel.invocations.clear();
-    channel.queuedCallIds = [];
-    channel.deliveredCallIds.clear();
   }
 
 }

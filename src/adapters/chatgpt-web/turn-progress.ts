@@ -1,9 +1,7 @@
-export interface ChatGptExternalTurnProgressSnapshot {
-  revision: number;
-  lastToolBatchRevision: number;
-  activeToolCalls: number;
-  lastProgressAt?: number;
-}
+import { VerifiedProgress, encodeProgressSnapshot, progressFailure, progressNat, type ProgressSnapshot } from "../../verified/progress";
+import type { ProgressEffect, ProgressEvent } from "../../verified/generated/core.cjs";
+
+export type ChatGptExternalTurnProgressSnapshot = ProgressSnapshot;
 
 interface ProgressWaiter {
   afterRevision: number;
@@ -77,46 +75,34 @@ abstract class ChatGptTurnProgressBroadcaster implements ChatGptTurnProgressRead
       if (waiter.signal && waiter.onAbort) {
         waiter.signal.removeEventListener("abort", waiter.onAbort);
       }
-      waiter.resolve(snapshot);
+      waiter.resolve({ ...snapshot });
     }
   }
 }
 
 export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster {
-  private revision = 0;
-  private lastToolBatchRevision = 0;
-  private observedToolBatchRevision = 0;
-  private activeToolCalls = 0;
-  private lastProgressAt?: number;
+  private readonly owner = new VerifiedProgress("Recorder");
+  /** Host exception resource, not the source of the retirement state. */
   private retirementError?: Error;
   private readonly toolBatchObservationWaiters = new Set<ToolBatchObservationWaiter>();
 
   snapshot(): ChatGptExternalTurnProgressSnapshot {
-    return {
-      revision: this.revision,
-      lastToolBatchRevision: this.lastToolBatchRevision,
-      activeToolCalls: this.activeToolCalls,
-      ...(this.lastProgressAt !== undefined ? { lastProgressAt: this.lastProgressAt } : {}),
-    };
+    return this.owner.snapshot();
   }
 
   recordToolBatch(count: number, now = Date.now()): number {
-    this.assertNotRetired();
-    if (!Number.isSafeInteger(count) || count <= 0) {
-      throw new Error("ChatGPT external progress requires a non-empty tool batch");
-    }
-    this.activeToolCalls += count;
-    this.advance(now, "tool_batch");
-    return this.lastToolBatchRevision;
+    this.apply({ $: "RecordBatch", count: progressNat(count, "batch size"), now: progressNat(now, "timestamp") });
+    const snapshot = this.snapshot();
+    this.notify(snapshot);
+    return snapshot.lastToolBatchRevision;
   }
 
   async acknowledgeToolBatch(revision: number): Promise<void> {
-    this.assertToolBatchRevision(revision);
-    this.assertNotRetired();
-    if (revision <= this.observedToolBatchRevision) return;
-    this.observedToolBatchRevision = revision;
+    const effect = this.apply({ $: "Acknowledge", revision: progressNat(revision, "batch revision") });
+    if (effect.$ === "ObservationReplayed") return;
+    const observed = this.owner.observed();
     for (const waiter of [...this.toolBatchObservationWaiters]) {
-      if (waiter.revision > revision) continue;
+      if (waiter.revision > observed) continue;
       this.toolBatchObservationWaiters.delete(waiter);
       if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
       waiter.resolve();
@@ -124,9 +110,10 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
   }
 
   waitForToolBatchObservation(revision: number, signal?: AbortSignal): Promise<void> {
-    this.assertToolBatchRevision(revision);
-    if (this.retirementError) return Promise.reject(this.retirementError);
-    if (this.observedToolBatchRevision >= revision) return Promise.resolve();
+    let effect: ProgressEffect;
+    try { effect = this.apply({ $: "CheckBatch", revision: progressNat(revision, "batch revision") }); }
+    catch (error) { return Promise.reject(error); }
+    if (effect.$ === "ObservationKnown") return Promise.resolve();
     if (signal?.aborted) {
       return Promise.reject(new DOMException("ChatGPT tool-boundary observation aborted", "AbortError"));
     }
@@ -144,56 +131,34 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
   }
 
   recordToolResult(now = Date.now()): void {
-    this.assertNotRetired();
-    if (this.activeToolCalls <= 0) {
-      throw new Error("ChatGPT external progress received a tool result without an active call");
-    }
-    this.activeToolCalls -= 1;
-    this.advance(now, "tool_result");
+    this.apply({ $: "RecordResult", now: progressNat(now, "timestamp") });
+    this.notify(this.snapshot());
   }
 
   /** Retire every unresolved batch when the broker capability can no longer accept its result. */
   retire(error: Error): boolean {
     if (!(error instanceof Error)) throw new Error("ChatGPT external progress retirement requires an error");
-    if (this.retirementError) return false;
+    const beforeRevision = this.snapshot().revision;
+    if (this.apply({ $: "Retire" }).$ === "RetirementReplayed") return false;
     this.retirementError = error;
     for (const waiter of this.toolBatchObservationWaiters) {
       if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
       waiter.reject(error);
     }
     this.toolBatchObservationWaiters.clear();
-    if (this.activeToolCalls === 0) return true;
-    this.activeToolCalls = 0;
-    // Retirement is not fresh model progress. Advance the transport revision so the browser mirror
-    // drops its completion veto, while preserving the timestamp of the last proven MCP activity.
-    this.revision += 1;
-    this.notify(this.snapshot());
+    const snapshot = this.snapshot();
+    if (snapshot.revision !== beforeRevision) this.notify(snapshot);
     return true;
   }
 
   assertToolBatchActive(revision: number): void {
-    this.assertToolBatchRevision(revision);
-    this.assertNotRetired();
+    this.apply({ $: "CheckBatch", revision: progressNat(revision, "batch revision") });
   }
 
-  private advance(now: number, event: "tool_batch" | "tool_result"): void {
-    if (!Number.isFinite(now)) throw new Error("ChatGPT external progress timestamp must be finite");
-    this.revision += 1;
-    if (event === "tool_batch") this.lastToolBatchRevision = this.revision;
-    this.lastProgressAt = now;
-    this.notify(this.snapshot());
-  }
-
-  private assertToolBatchRevision(revision: number): void {
-    if (!Number.isSafeInteger(revision)
-      || revision <= 0
-      || revision > this.lastToolBatchRevision) {
-      throw new Error("ChatGPT tool-boundary acknowledgement has an invalid batch revision");
-    }
-  }
-
-  private assertNotRetired(): void {
-    if (this.retirementError) throw this.retirementError;
+  private apply(event: ProgressEvent): ProgressEffect {
+    const effect = this.owner.dispatch(event);
+    if (effect.$ === "Reject") throw progressFailure(effect, this.retirementError);
+    return effect;
   }
 }
 
@@ -201,17 +166,11 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
  * Replays daemon-recorded progress inside the launcher browser helper process.
  *
  * The browser worker runs out of process from the Codex MCP broker, so the recording instance
- * cannot be shared with it. Without a mirror the worker observes no progress at all and its
- * liveness guards silently degrade to "never live", which lets a turn be cancelled while its tool
- * calls are still completing.
+ * cannot be shared with it. A mirror supplies causal answer-boundary evidence; it never supplies
+ * cancellation authority. Delayed acknowledgements commit through the same monotonic Bend state.
  */
 export class ChatGptMirroredTurnProgress extends ChatGptTurnProgressBroadcaster {
-  private current: ChatGptExternalTurnProgressSnapshot = {
-    revision: 0,
-    lastToolBatchRevision: 0,
-    activeToolCalls: 0,
-  };
-  private observedToolBatchRevision = 0;
+  private readonly owner = new VerifiedProgress("Replica");
 
   constructor(
     private readonly onToolBatchObserved?: (revision: number) => Promise<void> | void,
@@ -220,35 +179,26 @@ export class ChatGptMirroredTurnProgress extends ChatGptTurnProgressBroadcaster 
   }
 
   snapshot(): ChatGptExternalTurnProgressSnapshot {
-    return { ...this.current };
+    return this.owner.snapshot();
   }
 
   async acknowledgeToolBatch(revision: number): Promise<void> {
-    if (!Number.isSafeInteger(revision)
-      || revision <= 0
-      || revision > this.current.lastToolBatchRevision) {
-      throw new Error("ChatGPT mirrored tool-boundary acknowledgement has an invalid batch revision");
-    }
-    if (revision <= this.observedToolBatchRevision) return;
+    const event = { $: "CheckBatch" as const, revision: progressNat(revision, "batch revision") };
+    const check = this.owner.dispatch(event);
+    if (check.$ === "Reject") throw progressFailure(check);
+    if (check.$ === "ObservationKnown") return;
     await this.onToolBatchObserved?.(revision);
-    this.observedToolBatchRevision = revision;
+    // The remote receipt may complete after a newer receipt. Re-evaluate against
+    // the current model instead of restoring the revision captured before await.
+    const effect = this.owner.dispatch({ $: "Acknowledge", revision: event.revision });
+    if (effect.$ === "Reject") throw progressFailure(effect);
   }
 
   /** Ignores stale or replayed frames so out-of-order delivery cannot rewind observed liveness. */
   apply(next: ChatGptExternalTurnProgressSnapshot): boolean {
-    assertChatGptTurnProgressSnapshot(next);
-    if (next.revision <= this.current.revision) return false;
-    // A frame that advances the revision must not contradict what it already reported: the
-    // recorder only ever moves these forward, so a regression means a corrupt or forged frame
-    // rather than an ordering artefact, and accepting it would desynchronise observed liveness.
-    if (next.lastToolBatchRevision < this.current.lastToolBatchRevision
-      || (next.lastProgressAt === undefined && this.current.lastProgressAt !== undefined)
-      || (next.lastProgressAt !== undefined
-        && this.current.lastProgressAt !== undefined
-        && next.lastProgressAt < this.current.lastProgressAt)) {
-      throw new Error("ChatGPT external progress snapshot regressed against the observed state");
-    }
-    this.current = { ...next };
+    const effect = this.owner.dispatch({ $: "Import", snapshot: encodeProgressSnapshot(next) });
+    if (effect.$ === "Reject") throw progressFailure(effect);
+    if (effect.$ === "FrameIgnored") return false;
     this.notify(this.snapshot());
     return true;
   }
@@ -257,18 +207,7 @@ export class ChatGptMirroredTurnProgress extends ChatGptTurnProgressBroadcaster 
 export function assertChatGptTurnProgressSnapshot(
   value: ChatGptExternalTurnProgressSnapshot,
 ): void {
-  const finiteIndex = (candidate: number): boolean => Number.isSafeInteger(candidate) && candidate >= 0;
-  if (!value
-    || !finiteIndex(value.revision)
-    || !finiteIndex(value.lastToolBatchRevision)
-    || !finiteIndex(value.activeToolCalls)
-    || value.lastToolBatchRevision > value.revision
-    || (value.lastProgressAt !== undefined && !Number.isFinite(value.lastProgressAt))
-    // Any recorded activity stamps a timestamp, so a frame claiming progress without one is
-    // malformed and would otherwise report liveness the daemon never observed.
-    || (value.revision > 0 && value.lastProgressAt === undefined)) {
-    throw new Error("ChatGPT external progress snapshot is invalid");
-  }
+  encodeProgressSnapshot(value);
 }
 
 export function chatGptExternalProgressIsLive(

@@ -6,6 +6,7 @@ import { readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
+import { fingerprint } from "../../verified/generated/core.cjs";
 
 interface PendingTurn {
   turn: BrowserTurn;
@@ -21,13 +22,13 @@ interface PendingTurn {
 
 type HelperMessage =
   | { type: "ready"; features?: string[] }
-  | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
+  | { type: "event"; id: string; event: "heartbeat" | "uncertain" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
   | { type: "event"; id: string; event: "multipart_stage_acknowledged"; stageIndex: number }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
-  | { type: "result"; id: string; text: string }
+  | { type: "result"; id: string; text: string; historyBound?: boolean }
   | {
       type: "error";
       id: string;
@@ -97,7 +98,7 @@ function parseHelperMessage(line: string): HelperMessage {
       }
       return { type: "event", id: message.id, event, reused: message.reused };
     }
-    if (!["heartbeat", "send_activated", "submitted", "reasoning", "commentary", "text"].includes(String(event))) {
+    if (!["heartbeat", "uncertain", "send_activated", "submitted", "reasoning", "commentary", "text"].includes(String(event))) {
       throw new Error("Launcher browser helper emitted an unknown event");
     }
     if (text !== undefined && typeof text !== "string") {
@@ -109,7 +110,7 @@ function parseHelperMessage(line: string): HelperMessage {
     return {
       type: "event",
       id: message.id,
-      event: event as "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text",
+      event: event as "heartbeat" | "uncertain" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text",
       ...(text !== undefined ? { text: text as string } : {}),
       ...(continuation !== undefined ? { continuation: continuation as boolean } : {}),
     };
@@ -119,7 +120,10 @@ function parseHelperMessage(line: string): HelperMessage {
     if (typeof text !== "string") {
       throw new Error("Launcher browser helper result text is invalid");
     }
-    return { type: "result", id: message.id, text };
+    if (message.historyBound !== undefined && typeof message.historyBound !== "boolean") {
+      throw new Error("Launcher browser helper history receipt is invalid");
+    }
+    return { type: "result", id: message.id, text, ...(message.historyBound === true ? { historyBound: true } : {}) };
   }
   if (message.type === "error") {
     const errorMessage = message.message;
@@ -197,6 +201,9 @@ export class LauncherBrowserHelperClient {
     await this.waitForReady(turn.abortSignal);
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if (this.helperError) throw this.helperError;
+    if (!this.helperFeatures.has(`bend-core:${fingerprint}`)) {
+      throw new Error("Launcher browser helper has a different verified core. Update or restart the launcher before sending any prompt.");
+    }
     if (turn.onMultipartStageAcknowledged && !this.helperFeatures.has("multipart-stage-ack")) {
       throw new Error(
         "Launcher browser helper does not support multipart acknowledgement forwarding; update or restart the launcher",
@@ -266,6 +273,10 @@ export class LauncherBrowserHelperClient {
           },
           turn: {
             traceId: turn.traceId,
+            ...(turn.executionKey ? { executionKey: turn.executionKey } : {}),
+            ...(turn.requestIdentity ? { requestIdentity: turn.requestIdentity } : {}),
+            ...(turn.expectedAnswerDigest ? { expectedAnswerDigest: turn.expectedAnswerDigest } : {}),
+            ...(turn.expectedOperation ? { expectedOperation: turn.expectedOperation } : {}),
             modelId: turn.modelId,
             reasoning: turn.reasoning,
             capabilities: turn.capabilities,
@@ -480,6 +491,10 @@ export class LauncherBrowserHelperClient {
         ));
       }
       else if (message.event === "submitted") pending.turn.onSubmitted?.();
+      else if (message.event === "uncertain") {
+        pending.turn.onHeartbeat?.();
+        console.warn(`[chatgpt-web-helper] ${message.id}: ${message.text ?? "observation unavailable"}`);
+      }
       else if (message.event === "multipart_stage_acknowledged") {
         const multipart = pending.prepared?.multipart;
         if (!multipart
@@ -542,6 +557,7 @@ export class LauncherBrowserHelperClient {
       return;
     }
     if (message.type === "result") {
+      if (message.historyBound) pending.turn.onHistoryBound?.();
       this.finish(message.id);
       if (pending.localFailure) pending.reject(pending.localFailure);
       else pending.resolve(message.text);
@@ -564,17 +580,10 @@ export class LauncherBrowserHelperClient {
   private abortWithLocalFailure(id: string, error: Error, pending: PendingTurn): void {
     if (this.pending.get(id) !== pending || pending.localFailure) return;
     pending.localFailure = error;
-    void this.send({ type: "abort", id }).catch(sendError => {
-      if (this.pending.get(id) !== pending) return;
-      if (this.helperHasExited()) return;
-      this.finishWithError(
-        id,
-        new AggregateError(
-          [error, sendError instanceof Error ? sendError : new Error(String(sendError))],
-          "Launcher browser helper could not abort after a local protocol failure",
-        ),
-      );
-    });
+    // A protocol/observer failure carries no authority to stop the web response.
+    // Keep the lease and wait for correlated completion or an explicit user
+    // cancellation. In particular, do not release context files still in use.
+    console.error(`[chatgpt-web-helper] observation uncertain for ${id}; retaining the browser turn: ${error.message}`);
   }
 
   /**

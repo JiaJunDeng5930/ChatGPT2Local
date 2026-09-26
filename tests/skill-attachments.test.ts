@@ -5,6 +5,8 @@ import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { chatGptPromptFilePayloads } from "../src/adapters/chatgpt-web/browser-worker";
 import { retainedConversationResumeRequest } from "../src/adapters/chatgpt-web/conversation-key";
+import { historyOffset } from "../src/verified/core";
+import { historyEnvironment, historyMessages } from "../src/verified/web-history";
 import { estimateCompiledChatGptWebInputTokens, estimateCompiledChatGptWebMessageTokens } from "../src/adapters/chatgpt-web/input-tokens";
 import { skillFileTokens } from "../src/adapters/chatgpt-web/skill-attachments";
 
@@ -63,10 +65,15 @@ test("files preserve resource authority and distinguish same-named versions with
 test("retained turns reuse prior attachments; fresh chats rebuild them and new skills still upload", () => {
   const history = [input(text()), { role: "assistant", content: [{ type: "output_text", text: "Done" }] }, input("Continue", ["user.text"])];
   const parsed = parse(history);
-  const resumed = retainedConversationResumeRequest(parsed)!;
+  const confirmed = parse(history.slice(0, 2));
+  const resume = (next: ReturnType<typeof parse>) => retainedConversationResumeRequest(next,
+    historyOffset(historyEnvironment(confirmed), historyEnvironment(next), historyMessages(confirmed), historyMessages(next)));
+  // Message shape alone is not evidence that this page owns these attachments.
+  expect(retainedConversationResumeRequest(parsed)).toBeUndefined();
+  const resumed = resume(parsed)!;
   expect(compileChatGptWebPrompt(resumed, capabilities, token, { experimentalSkillAttachments: true }).skillFiles).toBeUndefined();
   expect(compile(history).skillFiles).toHaveLength(1);
-  const next = retainedConversationResumeRequest(parse([...history, input(text("next"))]))!;
+  const next = resume(parse([...history, input(text("next"))]))!;
   const compiled = compileChatGptWebPrompt(next, capabilities, token, { experimentalSkillAttachments: true });
   expect(compiled.skillFiles).toHaveLength(1);
   expect(compiled.skillFiles![0]!.name).toStartWith("next--");

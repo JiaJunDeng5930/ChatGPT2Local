@@ -42,17 +42,18 @@ export function chatGptConversationKey(
   })).digest("hex");
 }
 
-/** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */
+/** Only a receipt-backed Bend selection authorizes omission of browser history. */
 export function retainedConversationResumeRequest(
   parsed: CodexParsedRequest,
+  confirmedPrefixLength?: number,
 ): CodexParsedRequest | undefined {
-  const lastAssistant = parsed.context.messages.findLastIndex(message => message.role === "assistant");
-  if (lastAssistant < 0 || lastAssistant === parsed.context.messages.length - 1) return undefined;
+  if (!Number.isSafeInteger(confirmedPrefixLength) || confirmedPrefixLength! <= 0
+    || confirmedPrefixLength! >= parsed.context.messages.length) return undefined;
   return {
     ...parsed,
     context: {
       ...parsed.context,
-      messages: parsed.context.messages.slice(lastAssistant + 1),
+      messages: parsed.context.messages.slice(confirmedPrefixLength),
     },
   };
 }

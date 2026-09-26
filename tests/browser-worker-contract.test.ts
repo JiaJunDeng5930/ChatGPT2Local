@@ -505,6 +505,8 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
       baseline: unknown,
       capture?: (checkpoint: string) => Promise<void>,
       signal?: AbortSignal,
+      progress?: unknown,
+      lifecycle?: { onSendActivated(): void },
     ): Promise<string>;
   };
   const hiddenLocator = {
@@ -539,7 +541,7 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     "multipart-send-budget",
     "send",
     1_000,
-    stageSignal => worker.sendAttachedPrompt(page, {}, undefined, stageSignal),
+    stageSignal => worker.sendAttachedPrompt(page, {}, undefined, stageSignal, undefined, { onSendActivated() {} }),
   )).resolves.toBe("user_turn");
   expect(evaluateOptions).toMatchObject({ timeout: 0 });
   expect(evaluateOptions?.signal).toBeInstanceOf(AbortSignal);
@@ -1732,10 +1734,10 @@ test("a rate-limit dialog during send readiness does not fail or duplicate an ac
     activeComposer: async () => ({ locator: () => ({ locator: () => sendButton }) }),
     waitForSubmissionAccepted: async () => "user_turn",
   }) as unknown as {
-    sendAttachedPrompt(page: Page, baseline: unknown): Promise<string>;
+    sendAttachedPrompt(page: Page, baseline: unknown, capture?: unknown, signal?: AbortSignal, progress?: unknown, lifecycle?: { onSendActivated(): void }): Promise<string>;
   };
 
-  await expect(worker.sendAttachedPrompt(fixture.page, {})).resolves.toBe("user_turn");
+  await expect(worker.sendAttachedPrompt(fixture.page, {}, undefined, undefined, undefined, { onSendActivated() {} })).resolves.toBe("user_turn");
   expect(activations).toBe(2);
   expect(sendClicks).toBe(1);
   expect(fixture.pressed).toEqual([]);
@@ -1835,7 +1837,7 @@ test("proven current-turn MCP activity is conclusive submission evidence", async
 
   await expect(waitForSubmissionAccepted.call(
     {},
-    {} as Page,
+    { isClosed: () => false } as Page,
     {},
     undefined,
     progress,
@@ -2957,7 +2959,7 @@ test("Full mode has no fixed post-tool final-answer deadline", () => {
   }, 3_100 + CHATGPT_COMPLETION_SETTLE_MS)).toBeTrue();
 });
 
-test("Full mode fails closed when ChatGPT exposes completion without a post-tool final answer", () => {
+test("Full mode keeps observing rather than interrupting on a missing post-tool final answer", () => {
   const tracker = new ChatGptCompletionTracker(500, 1_000);
   const partialLookingFinal = {
     responsePresent: true,
@@ -2971,8 +2973,11 @@ test("Full mode fails closed when ChatGPT exposes completion without a post-tool
   expect(tracker.update(partialLookingFinal, 1_000)).toBeFalse();
   // Citation/markup hydration is not a new final answer and cannot release the boundary.
   expect(tracker.update({ ...partialLookingFinal, currentHtml: '<p data-hydrated="true">partial answer</p>' }, 1_999)).toBeFalse();
-  expect(() => tracker.update(partialLookingFinal, 2_000))
-    .toThrow("completed without producing a final answer after its last Codex tool call");
+  expect(tracker.update(partialLookingFinal, 2_000)).toBeFalse();
+  expect(tracker.update(partialLookingFinal, 200_000)).toBeFalse();
+  const realAnswer = { ...partialLookingFinal, currentText: "The actual answer after the tool completed.", currentHtml: "<p>The actual answer after the tool completed.</p>" };
+  expect(tracker.update(realAnswer, 200_100)).toBeFalse();
+  expect(tracker.update(realAnswer, 200_600)).toBeTrue();
 });
 
 test("a visible ChatGPT reply error cannot satisfy Full-mode completion", () => {

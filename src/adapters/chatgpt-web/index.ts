@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { buildResponseJSON } from "../../bridge";
+import { parseRequest } from "../../responses/parser";
+import { WebHistoryStore, transcriptExtends } from "../../verified/web-history";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
@@ -7,7 +10,7 @@ import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { stageChatGptWebContext } from "./context-file";
-import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
+import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, extractChatGptTurnUserRevision } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
@@ -266,6 +269,9 @@ export function createChatGptWebAdapter(
     && provider.chatgptWeb.browserHostDescriptorPath
       ? resolve(expandUserPath(provider.chatgptWeb.browserHostDescriptorPath))
       : undefined;
+  const historyStore = retainedLauncherDescriptor
+    ? new WebHistoryStore(join(dirname(retainedLauncherDescriptor), "web-history"))
+    : undefined;
   const environmentStore = new ChatGptThreadEnvironmentStore(
     provider.chatgptWeb?.threadEnvironmentStatePath
       ? resolve(expandUserPath(provider.chatgptWeb.threadEnvironmentStatePath))
@@ -280,16 +286,43 @@ export function createChatGptWebAdapter(
     hooks: { onCompactionProgress?: () => void } = {},
   ): ChatGptTurnRuntime => {
     const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
-    const conversationKey = !parsed._compactionRequest
-      && parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
-      && mode.localTools
-      && retainedLauncherDescriptor
+    const requestIdentity = createHash("sha256").update(JSON.stringify(
+      !parsed._compactionRequest && extractChatGptTurnIdentity(parsed).turnId
+        ? extractChatGptTurnUserRevision(parsed)
+        : parsed._rawBody ?? parsed,
+    )).digest("hex");
+    const operationKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+    const conversationScope = !parsed._compactionRequest && historyStore
       ? chatGptConversationKey(parsed, executionNamespace)
       : undefined;
-    const resumeInput = conversationKey
-      ? retainedConversationResumeRequest(parsed)
+    const historyPlan = conversationScope ? historyStore!.select(conversationScope, operationKey, parsed) : undefined;
+    const conversationKey = historyPlan?.key;
+    const resumeInput = historyPlan
+      ? retainedConversationResumeRequest(parsed, historyPlan.offset)
       : undefined;
     const retainConversation = conversationKey !== undefined;
+    let historyRecorded = false;
+    let historyBound = false;
+    const recordCompletedRound = (current: CodexParsedRequest, answer: string, events: readonly AdapterEvent[]): void => {
+      if (historyRecorded || !historyBound || !historyPlan || !conversationScope || !historyStore) return;
+      // The same browser response spans many Responses requests. Credit the
+      // exact accepted final round, including its tool transcript, not merely
+      // the input that happened to start the page.
+      if (!transcriptExtends(parsed, current)) return;
+      try {
+        const response = buildResponseJSON([...events], current.modelId, {
+          hideThinkingSummary: current.options.hideThinkingSummary,
+        });
+        const output = parseRequest({ model: current.modelId, input: response.output }).context.messages;
+        historyStore.remember(conversationScope, operationKey, historyPlan, current, answer, output);
+        historyRecorded = true;
+      } catch (error) {
+        // The browser already completed. Losing an optional history receipt
+        // must not turn that result into a retry or a cancellation. No future
+        // continuation may omit messages without a successfully stored receipt.
+        console.error(`[chatgpt-web] could not retain completed history for ${traceId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
     const compileOptionsFor = (input: CodexParsedRequest) => {
       const experimentalMultipartParts = experimentalBiggerContext && !mode.localTools
         ? resolveBiggerContextMultipartParts(input, turnCapabilities, experimentalSkillAttachments)
@@ -305,8 +338,8 @@ export function createChatGptWebAdapter(
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
     const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
-    // A canonical compaction request is side-effect free and remains safe to rebuild after an
-    // ambiguous browser send. Normal task prompts must never be replayed after Send activation.
+    // Every physical send consumes web quota, including compaction. Its durable
+    // permission belongs to the browser interpreter; this field is a projection.
     const submissionLifecycle = {
       ...(!parsed._compactionRequest ? {
         onSendActivated: () => { submission.phase = "send_activated" as const; },
@@ -320,20 +353,22 @@ export function createChatGptWebAdapter(
       ? { onMultipartStageAcknowledged: hooks.onCompactionProgress }
       : {};
     if (!mode.localTools) {
+      const prepareReadOnly = async (input: CodexParsedRequest) => ({
+        ...compileChatGptWebPrompt(input, turnCapabilities, undefined, compileOptionsFor(input)),
+        release: () => {},
+      });
       const browserTurn = cancellableBrowserTurn(worker.run({
         traceId,
+        executionKey: operationKey,
+        requestIdentity,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,
-        prepare: async () => ({
-          ...compileChatGptWebPrompt(
-            parsed,
-            turnCapabilities,
-            undefined,
-            compileOptionsFor(parsed),
-          ),
-          release: () => {},
-        }),
+        prepare: () => prepareReadOnly(parsed),
+        ...(resumeInput ? { prepareResume: () => prepareReadOnly(resumeInput),
+          expectedAnswerDigest: historyPlan?.expectedAnswerDigest, expectedOperation: historyPlan?.expectedOperation } : {}),
+        ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
+        onHistoryBound: () => { historyBound = true; },
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
@@ -349,6 +384,7 @@ export function createChatGptWebAdapter(
         trace,
         text,
         usageInput: parsed,
+        recordCompletedRound,
         submission,
         cancel: browserTurn.cancel,
       };
@@ -383,12 +419,16 @@ export function createChatGptWebAdapter(
     };
     const browserTurn = cancellableBrowserTurn(worker.run({
       traceId,
+      executionKey: operationKey,
+      requestIdentity,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
       capabilities: turnCapabilities,
       prepare: () => prepareWith(parsed),
-      ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput) } : {}),
+      ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput),
+        expectedAnswerDigest: historyPlan?.expectedAnswerDigest, expectedOperation: historyPlan?.expectedOperation } : {}),
       ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
+      onHistoryBound: () => { historyBound = true; },
       abortSignal: browserAbort.signal,
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
@@ -417,6 +457,7 @@ export function createChatGptWebAdapter(
       trace,
       text,
       usageInput: parsed,
+      recordCompletedRound,
       submission,
       cancel: (reason?: Error) => {
         browserTurn.cancel(reason);
@@ -601,6 +642,7 @@ export function createChatGptWebAdapter(
               const reasoning = session.roundReasoning(roundKey);
               session.setFinalReasoning(reasoning);
               session.setFinalEvents(session.roundEvents(roundKey));
+              session.runtime.recordCompletedRound?.(parsed, settled.answer, session.roundEvents(roundKey));
               emitRoundBatch(buffer => emitBrowserCompletion(
                 settled,
                 estimateChatGptWebUsage(parsed, { answer: settled.answer, reasoning }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),
@@ -699,6 +741,7 @@ export function createChatGptWebAdapter(
                 if (bufferStructuredOutput) {
                   emitRoundBatch(buffer => emitTextDeltas([completedOutcome.answer], buffer));
                 }
+                session.runtime.recordCompletedRound?.(parsed, completedOutcome.answer, session.roundEvents(roundKey));
                 emitRoundBatch(buffer => emitBrowserCompletion(
                   completedOutcome,
                   estimateChatGptWebUsage(parsed, { answer: completedOutcome.answer, reasoning: roundReasoning }, turnCapabilities, experimentalBiggerContext, experimentalSkillAttachments),

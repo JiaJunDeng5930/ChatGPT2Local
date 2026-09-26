@@ -399,6 +399,7 @@ describe("ChatGPT outer-native harness v4", () => {
       browserMessages += 1;
       const answer = browserMessages === 1 ? "First retained answer" : "Second retained answer";
       turn.onTextDelta(answer);
+      turn.onHistoryBound?.();
       return answer;
     };
 
@@ -440,7 +441,8 @@ describe("ChatGPT outer-native harness v4", () => {
       await adapter.runTurn!(second, { headers: new Headers() }, () => {});
 
       expect(browserMessages).toBe(2);
-      expect(conversationKeys[0]).toBe(chatGptConversationKey(first, chatGptWebExecutionNamespace(provider))!);
+      expect(conversationKeys[0]).toMatch(/^[a-f0-9]{64}$/);
+      expect(conversationKeys[0]).not.toBe(chatGptConversationKey(first, chatGptWebExecutionNamespace(provider))!);
       expect(conversationKeys[1]).toBe(conversationKeys[0]);
       expect(tokens[1]).not.toBe(tokens[0]);
       expect(preparedPrompts[0]).toContain("Inspect the project");

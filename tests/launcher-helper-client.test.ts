@@ -7,6 +7,12 @@ import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-erro
 import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
 import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
 import { LAUNCHER_BROWSER_HOST_KIND, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
+import { fingerprint } from "../src/verified/generated/core.cjs";
+
+function advertiseVerifiedCore(client: LauncherBrowserHelperClient, child: unknown, features: string[] = []): void {
+  (client as unknown as { handleLine(child: unknown, line: string): void }).handleLine(child,
+    JSON.stringify({ type: "ready", features: [`bend-core:${fingerprint}`, ...features] }));
+}
 
 const roots: string[] = [];
 afterEach(() => {
@@ -118,7 +124,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
   }
 });
 
-test("explicit abort retires through the helper while browser errors remain failures", async () => {
+test("only explicit abort cancels a helper turn; an independent browser error remains outcome-unknown", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-helper-abort-end-"));
   roots.push(root);
   const helper = join(root, "helper.ts");
@@ -177,7 +183,7 @@ test("explicit abort retires through the helper while browser errors remain fail
   try {
     for (const [traceId, status] of [
       ["explicit_abort", "aborted"],
-      ["actual_failure", "failed"],
+      ["actual_failure", "unknown"],
     ] as const) {
       const controller = new AbortController();
       let released = false;
@@ -226,7 +232,7 @@ test("malformed helper output preserves turns and an exited helper waits for exp
     const exitedPath = ${JSON.stringify(exitedPath)};
     const emit = message => process.stdout.write(JSON.stringify(message) + "\\n");
     appendFileSync(startsPath, "started\\n");
-    emit({ type: "ready" });
+    emit({ type: "ready", features: [${JSON.stringify(`bend-core:${fingerprint}`)}] });
     const input = createInterface({ input: process.stdin });
     input.on("line", line => {
       const message = JSON.parse(line);
@@ -351,6 +357,7 @@ test("launcher helper protocol preserves multipart context and the compaction fl
   const child = {};
   internal.child = child;
   internal.ensureChild = async () => {};
+  advertiseVerifiedCore(client, child);
   internal.send = async message => {
     sent.push(message);
     if (typeof message.id !== "string") return;
@@ -424,6 +431,7 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
   };
   internal.child = { exitCode: null, signalCode: null };
   internal.ensureChild = async () => {};
+  advertiseVerifiedCore(client, internal.child);
   internal.send = async message => {
     messages.push(message.type);
     if (message.type === "run") controller.abort();
@@ -510,20 +518,22 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
   });
 });
 
-test("an older helper cannot silently drop selected skill files and releases the prepared turn", async () => {
+test("a helper without attachment transport neither drops files nor cancels the page; explicit cancellation releases them", async () => {
   const client = new LauncherBrowserHelperClient({
     appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: "/durable/launcher.json",
     storageStatePath: "/durable/unused.json", chromeExecutablePath: "/durable/chrome", headed: true, autoApproveToolCalls: false,
   });
   const internal = client as unknown as {
     child: unknown;
+    pending: Map<string, { localFailure?: Error }>;
     ensureChild(): Promise<void>;
     send(message: Record<string, unknown>): Promise<void>;
     handleLine(child: unknown, line: string): void;
   };
-  const child = {};
+  const child = { exitCode: null, signalCode: null };
   internal.child = child;
   internal.ensureChild = async () => {};
+  advertiseVerifiedCore(client, child);
   const sent: string[] = [];
   internal.send = async message => {
     sent.push(String(message.type));
@@ -535,8 +545,10 @@ test("an older helper cannot silently drop selected skill files and releases the
     })));
   };
   let released = false;
-  await expect(client.run({
+  const controller = new AbortController();
+  const result = client.run({
     traceId: "skill-old-helper", modelId: "gpt-5.6-sol", reasoning: "high",
+    abortSignal: controller.signal,
     capabilities: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: false, proAvailable: false },
     prepare: async () => ({ text: "inspect", images: [],
       skillFiles: [selectedSkillFile({ role: "user", origin: "codex_skill", timestamp: 0,
@@ -545,7 +557,14 @@ test("an older helper cannot silently drop selected skill files and releases the
       release() { released = true; },
     }),
     onTextDelta() {},
-  })).rejects.toThrow("does not support skill attachments");
+  });
+  void result.catch(() => {});
+  await waitUntil(() => internal.pending.get("skill-old-helper")?.localFailure !== undefined,
+    "missing attachment transport was not diagnosed");
+  expect(sent).toEqual(["run"]);
+  expect(released).toBeFalse();
+  controller.abort(new DOMException("user cancelled", "AbortError"));
+  await expect(result).rejects.toThrow("does not support skill attachments");
   expect(sent).toEqual(["run", "abort"]);
   expect(released).toBe(true);
 });

@@ -9,6 +9,7 @@ import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
 import { isChatGptWebMultipartPartCount, type CompiledChatGptWebPrompt } from "./prompt";
 import { ChatGptMirroredTurnProgress } from "./turn-progress";
+import { fingerprint } from "../../verified/generated/core.cjs";
 import type { ChatGptExternalTurnProgressSnapshot } from "./turn-progress";
 
 interface RunMessage {
@@ -23,6 +24,10 @@ interface RunMessage {
   };
   turn: {
     traceId: string;
+    executionKey?: string;
+    requestIdentity?: string;
+    expectedAnswerDigest?: string;
+    expectedOperation?: string;
     modelId: string;
     reasoning?: string;
     capabilities: ChatGptWebCapabilities;
@@ -116,7 +121,9 @@ function requestShutdown(): Promise<void> {
   shuttingDown = true;
   protocolOutput.close();
   diagnosticOutput.close();
-  for (const controller of abortControllers.values()) controller.abort();
+  // Shutdown detaches the transport. Only an explicit `abort` command below
+  // may abort the USER cancellation controllers. Worker.close has its own
+  // independent observer shutdown signal and never authorizes clicking Stop.
   for (const selection of preparedSelections.values()) selection.cancel();
   preparedSelections.clear();
   for (const waiter of sendActivationWaiters.values()) {
@@ -202,8 +209,15 @@ async function run(message: RunMessage): Promise<void> {
   const promptSelection = createBrowserHelperPromptSelection();
   preparedSelections.set(message.id, promptSelection);
   const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
+  let historyBound = false;
   const turn: BrowserTurn = {
     traceId: message.turn.traceId,
+    ...(message.turn.executionKey ? { executionKey: message.turn.executionKey } : {}),
+    ...(message.turn.requestIdentity ? { requestIdentity: message.turn.requestIdentity } : {}),
+    ...(message.turn.expectedAnswerDigest ? { expectedAnswerDigest: message.turn.expectedAnswerDigest } : {}),
+    ...(message.turn.expectedOperation ? { expectedOperation: message.turn.expectedOperation } : {}),
+    onHistoryBound: () => { historyBound = true; },
+    onObservationUncertain: notice => { writeProtocol({ type: "event", id: message.id, event: "uncertain", text: notice }); },
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
     capabilities: message.turn.capabilities,
@@ -286,7 +300,7 @@ async function run(message: RunMessage): Promise<void> {
   };
   try {
     const text = await ChatGptBrowserWorker.forProvider(provider).run(turn);
-    writeProtocol({ type: "result", id: message.id, text });
+    writeProtocol({ type: "result", id: message.id, text, ...(historyBound ? { historyBound: true } : {}) });
   } catch (error) {
     writeProtocol({
       type: "error",
@@ -379,17 +393,20 @@ input.on("line", line => {
     writeProtocol({ type: "error", id: "protocol", message: "Browser helper received invalid JSON" });
     return;
   }
+  if (!message || typeof message !== "object" || typeof message.type !== "string"
+    || ("id" in message && typeof message.id !== "string")) {
+    console.error("[browser-helper] ignored a malformed transport frame; no browser operation was changed");
+    return;
+  }
   if (message.type === "prepared_selected_ack") {
     const prepared = message.prepared;
     if (!prepared || typeof prepared.text !== "string" || !Array.isArray(prepared.images)) {
-      writeProtocol({ type: "error", id: message.id, message: "Browser helper prompt selection is invalid" });
-      abortControllers.get(message.id)?.abort();
+      writeProtocol({ type: "event", id: message.id, event: "uncertain", text: "Browser helper prompt selection is invalid" });
       return;
     }
     try { validateSkillFiles(prepared.skillFiles); }
     catch (error) {
-      writeProtocol({ type: "error", id: message.id, message: error instanceof Error ? error.message : String(error) });
-      abortControllers.get(message.id)?.abort();
+      writeProtocol({ type: "event", id: message.id, event: "uncertain", text: error instanceof Error ? error.message : String(error) });
       return;
     }
     if (prepared.multipart !== undefined) {
@@ -398,21 +415,20 @@ input.on("line", line => {
         || !isChatGptWebMultipartPartCount(multipart.parts.length)
         || multipart.parts.some(part => typeof part !== "string")
         || typeof multipart.commit !== "string") {
-        writeProtocol({ type: "error", id: message.id, message: "Browser helper multipart prompt is invalid" });
-        abortControllers.get(message.id)?.abort();
+        writeProtocol({ type: "event", id: message.id, event: "uncertain", text: "Browser helper multipart prompt is invalid" });
         return;
       }
     }
     const selection = preparedSelections.get(message.id);
     if (!selection) {
-      writeProtocol({ type: "error", id: message.id, message: "Browser helper has no pending prompt selection" });
+      writeProtocol({ type: "event", id: message.id, event: "uncertain", text: "Browser helper has no pending prompt selection" });
       return;
     }
     selection.select(prepared);
   } else if (message.type === "send_activation_ack") {
     const waiter = sendActivationWaiters.get(message.id);
     if (!waiter) {
-      writeProtocol({ type: "error", id: message.id, message: "Browser helper has no pending Send activation" });
+      writeProtocol({ type: "event", id: message.id, event: "uncertain", text: "Browser helper has no pending Send activation" });
       return;
     }
     sendActivationWaiters.delete(message.id);
@@ -420,8 +436,7 @@ input.on("line", line => {
   } else if (message.type === "completion_fence_begin_ack") {
     if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
       || (message.revision !== null && (!Number.isSafeInteger(message.revision) || message.revision < 0))) {
-      writeProtocol({ type: "error", id: message.id, message: "Browser helper completion fence revision is invalid" });
-      abortControllers.get(message.id)?.abort();
+      writeProtocol({ type: "event", id: message.id, event: "uncertain", text: "Browser helper completion fence revision is invalid" });
       return;
     }
     const waiter = completionFenceBeginWaiters.get(message.id);
@@ -431,8 +446,7 @@ input.on("line", line => {
   } else if (message.type === "completion_fence_commit_ack") {
     if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
       || typeof message.committed !== "boolean") {
-      writeProtocol({ type: "error", id: message.id, message: "Browser helper completion fence result is invalid" });
-      abortControllers.get(message.id)?.abort();
+      writeProtocol({ type: "event", id: message.id, event: "uncertain", text: "Browser helper completion fence result is invalid" });
       return;
     }
     const waiter = completionFenceCommitWaiters.get(message.id);
@@ -508,4 +522,4 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "skill-attachments"] });
+writeProtocol({ type: "ready", features: [`bend-core:${fingerprint}`, "progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "skill-attachments"] });

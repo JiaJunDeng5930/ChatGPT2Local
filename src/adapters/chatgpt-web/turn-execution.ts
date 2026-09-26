@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { VerifiedOutbox, VerifiedReplayJournal } from "../../verified/replay";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
 import { chatGptBrowserTabClosedError } from "./adapter-error";
@@ -116,6 +117,7 @@ interface ChatGptTurnRuntimeBase {
   trace: ChatGptTraceFeed;
   text: ChatGptTextFeed;
   usageInput?: CodexParsedRequest;
+  recordCompletedRound?: (request: CodexParsedRequest, answer: string, events: readonly AdapterEvent[]) => void;
   submission?: { phase: "prepared" | "send_activated" | "accepted" };
   cancel: (reason?: Error) => void;
 }
@@ -220,20 +222,12 @@ export function chatGptThreadOwnershipKey(parsed: CodexParsedRequest): string {
 export class ChatGptTurnSession {
   readonly browserOutcome: Promise<ChatGptBrowserOutcome>;
   readonly physicalSettlement: Promise<void>;
-  private readonly outstandingById = new Map<string, BrokerToolRequest>();
-  private readonly deliveredResultIds = new Set<string>();
-  private outstandingReasoning: string[] = [];
+  private readonly outbox = new VerifiedOutbox();
   private finalReasoning: string[] = [];
-  private outstandingPrelude: AdapterEvent[] = [];
   private finalPrelude: AdapterEvent[] = [];
   private settledBrowserOutcome?: ChatGptBrowserOutcome;
   private tail: Promise<void> = Promise.resolve();
-  private readonly rounds = new Map<string, {
-    events: AdapterEvent[];
-    reasoning: string[];
-    completed: boolean;
-    failure?: Error;
-  }>();
+  private readonly rounds = new Map<string, VerifiedReplayJournal>();
 
   constructor(
     readonly runtime: ChatGptTurnRuntime,
@@ -258,7 +252,7 @@ export class ChatGptTurnSession {
   }
 
   outstanding(): BrokerToolRequest[] {
-    return [...this.outstandingById.values()];
+    return this.outbox.pending();
   }
 
   settledOutcome(): ChatGptBrowserOutcome | undefined {
@@ -270,36 +264,23 @@ export class ChatGptTurnSession {
   }
 
   setOutstanding(requests: BrokerToolRequest[], reasoning: string[] = [], prelude: AdapterEvent[] = []): void {
-    if (this.outstandingById.size > 0) throw new Error("cannot emit a new ChatGPT tool batch while the previous batch is unresolved");
-    for (const request of requests) {
-      if (this.deliveredResultIds.has(request.callId) || this.outstandingById.has(request.callId)) {
-        throw new Error(`duplicate ChatGPT bridge tool call id: ${request.callId}`);
-      }
-      this.outstandingById.set(request.callId, request);
-    }
-    this.outstandingReasoning = [...reasoning];
-    this.outstandingPrelude = [...prelude];
+    this.outbox.offer(requests, reasoning, prelude);
   }
 
   hasOutstanding(callId: string): boolean {
-    return this.outstandingById.has(callId);
+    return this.outbox.contains(callId);
   }
 
   markResultDelivered(callId: string): void {
-    if (!this.outstandingById.delete(callId)) throw new Error(`ChatGPT bridge tool result does not match an outstanding call: ${callId}`);
-    this.deliveredResultIds.add(callId);
-    if (this.outstandingById.size === 0) {
-      this.outstandingReasoning = [];
-      this.outstandingPrelude = [];
-    }
+    this.outbox.receipt(callId);
   }
 
   reasoningForOutstandingReplay(): string[] {
-    return [...this.outstandingReasoning];
+    return this.outbox.prelude().reasoning;
   }
 
   eventsForOutstandingReplay(): AdapterEvent[] {
-    return [...this.outstandingPrelude];
+    return this.outbox.prelude().events;
   }
 
   setFinalReasoning(reasoning: string[]): void {
@@ -311,19 +292,19 @@ export class ChatGptTurnSession {
   }
 
   setFinalEvents(events: AdapterEvent[]): void {
-    this.finalPrelude = [...events];
+    this.finalPrelude = structuredClone(events);
   }
 
   eventsForFinalReplay(): AdapterEvent[] {
-    return [...this.finalPrelude];
+    return structuredClone(this.finalPrelude);
   }
 
   roundEvents(key: string): AdapterEvent[] {
-    return [...this.round(key).events];
+    return this.round(key).events();
   }
 
   roundReasoning(key: string): string[] {
-    return [...this.round(key).reasoning];
+    return this.round(key).reasoning();
   }
 
   appendRoundEvent(key: string, event: AdapterEvent): void {
@@ -331,39 +312,31 @@ export class ChatGptTurnSession {
   }
 
   appendRoundEvents(key: string, events: readonly AdapterEvent[]): void {
-    if (events.length === 0) return;
-    const round = this.round(key);
-    if (round.completed) throw new Error("cannot append to a completed ChatGPT native round");
-    round.events.push(...events);
+    this.round(key).append(events);
   }
 
   appendRoundReasoning(key: string, values: readonly string[]): void {
-    if (values.length === 0) return;
-    const round = this.round(key);
-    if (round.completed) throw new Error("cannot append reasoning to a completed ChatGPT native round");
-    round.reasoning.push(...values);
+    this.round(key).reason(values);
   }
 
   completeRound(key: string): void {
-    this.round(key).completed = true;
+    this.round(key).seal();
   }
 
   failRound(key: string, error: Error): void {
-    const round = this.round(key);
-    round.failure = error;
-    round.completed = true;
+    this.round(key).fail(error);
   }
 
   roundCompleted(key: string): boolean {
-    return this.rounds.get(key)?.completed === true;
+    return this.rounds.get(key)?.closed() === true;
   }
 
   roundFailure(key: string): Error | undefined {
-    return this.rounds.get(key)?.failure;
+    return this.rounds.get(key)?.failure();
   }
 
   roundHasTerminalEvent(key: string): boolean {
-    return this.rounds.get(key)?.events.some(event => event.type === "done" || event.type === "error") === true;
+    return this.rounds.get(key)?.terminal() === true;
   }
 
   cancel(reason?: Error): void {
@@ -373,7 +346,7 @@ export class ChatGptTurnSession {
   private round(key: string) {
     let round = this.rounds.get(key);
     if (round) return round;
-    round = { events: [], reasoning: [], completed: false };
+    round = new VerifiedReplayJournal();
     this.rounds.set(key, round);
     return round;
   }
@@ -401,6 +374,18 @@ export class ChatGptTurnSessions {
     return this.entries.get(key);
   }
 
+  /**
+   * Drop observer references during daemon shutdown, without invoking a user
+   * cancellation capability. Workers detach their own transports; durable send
+   * reservations and the launcher-owned webpages remain untouched.
+   */
+  detachAll(): number {
+    const detached = this.entries.size;
+    this.entries.clear();
+    return detached;
+  }
+
+  /** Explicit operator cancellation, never transport or process cleanup. */
   clear(): number {
     const cancelled = this.entries.size;
     for (const [key, session] of this.entries) this.beginRetirement(key, session);

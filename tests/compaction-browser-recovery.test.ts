@@ -47,10 +47,11 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
     },
     attachFiles: async () => { actions.push("files"); },
     sendAttachedPrompt: async (...args: unknown[]) => {
-      // Context ingestion cannot mistake tool activity for acknowledgement of a part.
-      expect(args[4]).toBe(stage === "send" ? progress : undefined);
+      // Submission observation has no timer that can cancel an already sent
+      // page. The final payload follows file preparation, not a timed Send stage.
+      const final = stage === "file_attachment";
+      expect(args[4]).toBe(final ? progress : undefined);
       const lifecycle = args[5] as { onSendActivated(): Promise<void>; onSubmitted?: () => void };
-      if (stage !== "send") expect(lifecycle.onSubmitted).toBeUndefined();
       await lifecycle.onSendActivated();
       if (cancellationCase) {
         // An observed size rejection must not replace the user's explicit tab-close verdict.
@@ -65,9 +66,9 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       return "user_turn";
     },
     waitForNewAssistantTurn: async (...args: unknown[]) => {
-      expect(args[4]).toBe(stage === "send" ? progress : undefined);
+      expect(args[4]).toBe(stage === "file_attachment" ? progress : undefined);
       actions.push("observe");
-      if (stage === "send") {
+      if (stage === "file_attachment") {
         closed = true;
         page.emit("close");
         throw finalResponse;
@@ -99,9 +100,9 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       `effort:${effort}`,
       tools ? "attach:tools" : "attach:plain", "files", "send", "observe",
     ]);
-    expect(sendBudgets).toEqual(multipart ? Array(6).fill(180_000) : [20_000]);
+    expect(sendBudgets).toEqual([]);
     expect(released).toBe(true);
-    expect(activated).toBe(1);
+    expect(activated).toBe(multipart ? 6 : 1);
     expect(page.listenerCount("request")).toBe(0);
     expect(page.listenerCount("response")).toBe(0);
   } finally {
