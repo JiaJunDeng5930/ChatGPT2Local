@@ -46,8 +46,6 @@ const AUTH_PROVIDER_HOSTS = new Set([
   "appleid.apple.com",
   "idmsa.apple.com",
 ]);
-const CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS = 500;
-const CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS = 1_000;
 const COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
@@ -239,7 +237,6 @@ function loadCommittedBrowserSurface(
     const onDestroyed = () => finish(new Error("Browser closed during idle document bootstrap"));
     const timeout = setTimeout(() => {
       finish(new Error(`Browser idle document did not commit within ${timeoutMs}ms`));
-      if (!contents.isDestroyed()) contents.stop();
     }, timeoutMs);
     timeout.unref?.();
     contents.on("did-stop-loading", onReady);
@@ -313,10 +310,7 @@ class BrowserHost {
     this.manualOperation = null;
     this.loginOperation = null;
     this.sessionRefreshOperation = null;
-    this.cloudflareChallengeRecovery = null;
-    this.cloudflareChallengeRecoveryArmed = true;
-    this.cloudflareChallengeRecoveryDelayMs = CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS;
-    this.cloudflareChallengeRecoverySettleMs = CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS;
+    this.cloudflareChallengeObserved = false;
     this.viewportCssKey = null;
     this.shellZoomShortcutBindings = new Map();
     this.authView = null;
@@ -357,7 +351,7 @@ class BrowserHost {
     this.view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(this.window.webContents);
     this.bindShellZoomShortcuts(this.view.webContents);
-    this.bindChatGptBackendRecovery();
+    this.bindChatGptBackendObservation();
     this.bindWebContents();
     this.initializationReady = this.initializePrimaryView().catch((error) => {
       this.logger.error("browser.initialization_failed", {
@@ -752,10 +746,9 @@ class BrowserHost {
     this.homeNavigationTimeout = setTimeout(() => {
       this.homeNavigationTimeout = null;
       if (contents.isDestroyed() || !contents.isLoadingMainFrame()) return;
-      contents.stop();
-      const message = "ChatGPT did not finish loading within 60 seconds. Check your connection and retry.";
-      this.logger.error("browser.navigation_timeout", { origin: navigationOriginForLog(url) });
-      this.setState({ status: "error", message, url, loading: false });
+      const message = "ChatGPT loading could not be confirmed. The page remains open and has not been stopped or reloaded.";
+      this.logger.warn("browser.navigation_observation_timeout", { origin: navigationOriginForLog(url) });
+      this.setState({ message });
     }, BROWSER_NAVIGATION_TIMEOUT_MS);
     this.homeNavigationTimeout.unref?.();
   }
@@ -809,8 +802,7 @@ class BrowserHost {
       };
       const onDestroyed = () => finish(new Error("ChatGPT closed during hard refresh"));
       const timeout = setTimeout(() => {
-        finish(new Error("ChatGPT hard refresh did not finish within 60 seconds"));
-        if (!contents.isDestroyed()) contents.stop();
+        finish(new Error("ChatGPT hard refresh could not be confirmed; the page has not been stopped"));
       }, timeoutMs);
       timeout.unref?.();
       contents.on("did-start-navigation", onStarted);
@@ -838,7 +830,7 @@ class BrowserHost {
     await this.waitForAuthenticated(60_000);
   }
 
-  bindChatGptBackendRecovery() {
+  bindChatGptBackendObservation() {
     this.view.webContents.session.webRequest.onCompleted(
       CHATGPT_BACKEND_REQUEST_FILTER,
       details => this.handleChatGptBackendResponse(details),
@@ -851,64 +843,19 @@ class BrowserHost {
     if (!isChatGptBackendUrl(details.url)) return false;
 
     if (details.statusCode >= 200 && details.statusCode < 400) {
-      this.cloudflareChallengeRecoveryArmed = true;
+      this.cloudflareChallengeObserved = false;
       return false;
     }
     if (!isChatGptCloudflareChallengeResponse(details)) return false;
-    if (this.cloudflareChallengeRecovery) {
-      this.cloudflareChallengeRecoveryArmed = false;
-      return true;
+    // The home view may also contain a manually running ChatGPT response.
+    // No network classifier, even an explicit challenge header, authorizes a
+    // reload. Only a deliberate user navigation may change this document.
+    if (!this.cloudflareChallengeObserved) {
+      this.logger.warn("browser.cloudflare_challenge_observed", { url: details.url });
+      this.setState({ message: "A ChatGPT security check was observed. The page has not been reloaded or stopped." });
     }
-    if (this.activeTraceId || this.manualOperation) {
-      this.logger.warn("browser.cloudflare_challenge_not_reloaded", {
-        reason: this.activeTraceId ? "turn-active" : "manual-operation-active",
-        url: details.url,
-      });
-      return true;
-    }
-    if (!this.cloudflareChallengeRecoveryArmed) {
-      this.logger.warn("browser.cloudflare_challenge_persisted", { url: details.url });
-      return true;
-    }
-    this.cloudflareChallengeRecoveryArmed = false;
-    this.logger.warn("browser.cloudflare_challenge_detected", { url: details.url });
-    const recovery = this.reloadHomeAfterCloudflareChallenge();
-    const tracked = recovery
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.error("browser.cloudflare_challenge_recovery_failed", { message });
-        this.setState({ status: "error", message, loading: false });
-      })
-      .finally(() => {
-        if (this.cloudflareChallengeRecovery === tracked) this.cloudflareChallengeRecovery = null;
-      });
-    this.cloudflareChallengeRecovery = tracked;
+    this.cloudflareChallengeObserved = true;
     return true;
-  }
-
-  async reloadHomeAfterCloudflareChallenge() {
-    const contents = this.view.webContents;
-    this.setState({
-      status: "loading",
-      message: "Refreshing ChatGPT security check",
-      loading: true,
-    });
-    await sleep(this.cloudflareChallengeRecoveryDelayMs);
-    if (contents.isDestroyed()) throw new Error("ChatGPT browser closed during security-check recovery");
-    const url = contents.getURL();
-    if (!url.startsWith(CHATGPT_ORIGIN)) {
-      throw new Error("ChatGPT security-check recovery lost its owned browser page");
-    }
-
-    // Only responses from this new document may prove that the challenge cleared.
-    this.cloudflareChallengeRecoveryArmed = false;
-    await contents.loadURL(url);
-    await sleep(this.cloudflareChallengeRecoverySettleMs);
-    if (!this.cloudflareChallengeRecoveryArmed) {
-      throw new Error("ChatGPT security check is still blocking backend requests. Reload ChatGPT and retry.");
-    }
-    await this.probeAuthentication();
-    this.logger.info("browser.cloudflare_challenge_recovered", { url });
   }
 
   snapshot() {
@@ -1192,15 +1139,12 @@ class BrowserHost {
       authView.navigationTimeout = setTimeout(() => {
         authView.navigationTimeout = null;
         if (this.authView !== authView || contents.isDestroyed()) return;
-        contents.stop();
-        const message = "The ChatGPT sign-in page did not finish loading within 60 seconds. Check your connection and try again.";
-        this.authNavigationError = new Error(message);
-        this.logger.error("browser.auth_navigation_timeout", {
+        const message = "Sign-in loading could not be confirmed. The sign-in page remains open; continue there or close it explicitly.";
+        this.logger.warn("browser.auth_navigation_observation_timeout", {
           surface: "popup",
           origin: navigationOriginForLog(url),
         });
-        this.closeAuthView(authView, true, false);
-        this.setState({ status: "error", message, url, loading: false });
+        this.setState({ message });
       }, BROWSER_NAVIGATION_TIMEOUT_MS);
       authView.navigationTimeout.unref?.();
     };
@@ -1249,7 +1193,6 @@ class BrowserHost {
         errorDescription,
         origin: navigationOriginForLog(url),
       });
-      this.closeAuthView(authView, true, false);
       this.setState({ status: "error", message, url, loading: false });
     });
     contents.on("render-process-gone", (_event, details) => {
@@ -1257,7 +1200,6 @@ class BrowserHost {
       const message = `ChatGPT sign-in renderer stopped: ${details.reason}`;
       this.authNavigationError = new Error(message);
       this.logger.error("browser.auth_renderer_gone", { reason: details.reason, exitCode: details.exitCode });
-      this.closeAuthView(authView, false);
       this.setState({ status: "error", message, loading: false });
     });
     contents.setWindowOpenHandler(({ url }) => {
@@ -1274,7 +1216,6 @@ class BrowserHost {
             origin: navigationOriginForLog(url),
             ...navigationErrorForLog(error),
           });
-          this.closeAuthView(authView, true, false);
           this.setState({ status: "error", message, url, loading: false });
         });
       } else {

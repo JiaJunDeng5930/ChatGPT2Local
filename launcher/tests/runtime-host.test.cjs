@@ -78,7 +78,7 @@ test("core setup replaces the known legacy connector identity with the direct-tu
   const fixture = hostFor({ mode: "full", appName: "Codex Native" });
   await fixture.host.setupCore();
   assert.equal(fixture.invocation().args.includes("--app-name"), false);
-  assert.equal(fixture.host.setupConnectorName(), CURRENT_CONNECTOR_NAME);
+  assert.equal(fixture.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
 });
 
 test("core setup starts in browser-only mode when no installation exists", async () => {
@@ -399,7 +399,7 @@ test("new MCP setup uses the fixed connector without a CLI name override", async
     "/runtime/launcher-browser.json",
   ]);
   assert.equal(fixture.invocation().args.includes("--app-name"), false);
-  assert.equal(fixture.host.setupConnectorName(), CURRENT_CONNECTOR_NAME);
+  assert.equal(fixture.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
 });
 
 test("MCP credential replacement remains explicit and requires a complete new pair", async () => {

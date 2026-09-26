@@ -25,7 +25,20 @@ const TUNNEL_MONITOR_INTERVAL_MS = 10_000;
 const TUNNEL_MONITOR_FAILURE_THRESHOLD = 3;
 const TUNNEL_MCP_FAILURE_RECENCY_MS = 2 * 60_000;
 const BOOT_TIME_CLOCK_TOLERANCE_MS = 5_000;
-const CURRENT_BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
+function observeBootStartedAt(now = Date.now, uptime = os.uptime) {
+  try {
+    const time = now();
+    const seconds = uptime();
+    const startedAt = time - (seconds * 1_000);
+    return Number.isFinite(time) && Number.isFinite(seconds) && seconds >= 0 && Number.isFinite(startedAt)
+      ? startedAt : undefined;
+  } catch {
+    // Sandboxed hosts can deny uv_uptime. Unknown boot evidence must neither
+    // prevent the launcher module from loading nor declare an old owner dead.
+    return undefined;
+  }
+}
+const CURRENT_BOOT_STARTED_AT_MS = observeBootStartedAt();
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -101,10 +114,11 @@ function tunnelRuntimeStopped(health) {
     || (health?.state === "stopped" && health?.processRunning === false);
 }
 
-function runtimeOwnershipPredatesCurrentBoot(state) {
+function runtimeOwnershipPredatesCurrentBoot(state, bootStartedAt = CURRENT_BOOT_STARTED_AT_MS) {
   return Boolean(
     state
-    && Date.parse(state.updatedAt) < CURRENT_BOOT_STARTED_AT_MS - BOOT_TIME_CLOCK_TOLERANCE_MS
+    && Number.isFinite(bootStartedAt)
+    && Date.parse(state.updatedAt) < bootStartedAt - BOOT_TIME_CLOCK_TOLERANCE_MS
   );
 }
 
@@ -2128,6 +2142,8 @@ module.exports = {
   TUNNEL_MONITOR_INTERVAL_MS,
   TUNNEL_START_TIMEOUT_MS,
   RuntimeSupervisor,
+  observeBootStartedAt,
+  runtimeOwnershipPredatesCurrentBoot,
   managedTunnelConnectArgs,
   validateConfig,
 };

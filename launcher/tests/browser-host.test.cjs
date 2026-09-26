@@ -117,7 +117,7 @@ test("primary browser bootstrap fails closed on navigation, renderer, and timeou
       loadCommittedBrowserSurface(stalled, IDLE_BROWSER_URL, 5),
       /idle document did not commit within 5ms/,
     );
-    assert.deepEqual(calls, ["stop"]);
+    assert.deepEqual(calls, []);
   } finally {
     clearTimeout(keepTestAlive);
   }
@@ -174,7 +174,7 @@ test("authentication diagnostics retain only origin and non-sensitive error meta
   );
 });
 
-test("only an explicit Cloudflare challenge on a ChatGPT backend response triggers recovery", () => {
+test("only an explicit Cloudflare challenge on a ChatGPT backend response is reported", () => {
   assert.equal(isChatGptCloudflareChallengeResponse({
     statusCode: 403,
     url: "https://chatgpt.com/backend-api/subscriptions",
@@ -195,21 +195,20 @@ test("only an explicit Cloudflare challenge on a ChatGPT backend response trigge
   }), false);
 });
 
-test("the idle home browser performs one bounded reload for a Cloudflare challenge burst", async () => {
+test("a home-page security-check observation never reloads or stops the page", async () => {
   const calls = [];
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map(),
     manualOperation: null,
-    cloudflareChallengeRecovery: null,
-    cloudflareChallengeRecoveryArmed: true,
-    cloudflareChallengeRecoveryDelayMs: 0,
-    cloudflareChallengeRecoverySettleMs: 0,
+    cloudflareChallengeObserved: false,
     view: {
       webContents: {
         id: 42,
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
         isDestroyed: () => false,
         loadURL: async (url) => calls.push(["loadURL", url]),
+        reload: () => calls.push(["reload"]),
+        stop: () => calls.push(["stop"]),
       },
     },
     logger: {
@@ -229,12 +228,9 @@ test("the idle home browser performs one bounded reload for a Cloudflare challen
 
   assert.equal(BrowserHost.prototype.handleChatGptBackendResponse.call(fixture, challenge), true);
   assert.equal(BrowserHost.prototype.handleChatGptBackendResponse.call(fixture, challenge), true);
-  await fixture.cloudflareChallengeRecovery;
-
-  assert.deepEqual(calls.filter(([name]) => name === "loadURL"), [
-    ["loadURL", "https://chatgpt.com/?temporary-chat=true"],
-  ]);
-  assert.equal(fixture.cloudflareChallengeRecoveryArmed, false);
+  assert.deepEqual(calls.filter(([name]) => ["loadURL", "reload", "stop", "probeAuthentication"].includes(name)), []);
+  assert.equal(calls.filter(([name]) => name === "warn").length, 1);
+  assert.equal(fixture.cloudflareChallengeObserved, true);
 
   BrowserHost.prototype.handleChatGptBackendResponse.call(fixture, {
     statusCode: 200,
@@ -242,7 +238,33 @@ test("the idle home browser performs one bounded reload for a Cloudflare challen
     webContentsId: 42,
     responseHeaders: { "content-type": ["application/json"] },
   });
-  assert.equal(fixture.cloudflareChallengeRecoveryArmed, true);
+  assert.equal(fixture.cloudflareChallengeObserved, false);
+});
+
+test("a home navigation observation deadline leaves the same document loading", (t) => {
+  const effects = [];
+  let deadline;
+  t.mock.method(globalThis, "setTimeout", callback => {
+    deadline = callback;
+    return { unref() {} };
+  });
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    homeNavigationTimeout: null,
+    logger: { warn: (...args) => effects.push(["warning", ...args]) },
+    setState: state => effects.push(["state", state]),
+  });
+  const contents = {
+    isDestroyed: () => false,
+    isLoadingMainFrame: () => true,
+    stop: () => effects.push(["stop"]),
+    reload: () => effects.push(["reload"]),
+    loadURL: () => effects.push(["navigation"]),
+  };
+  fixture.armHomeNavigationTimeout(contents, "https://chatgpt.com/");
+  deadline();
+  assert.deepEqual(effects.map(([kind]) => kind), ["warning", "state"]);
+  assert.deepEqual(Object.keys(effects[1][1]), ["message"]);
+  assert.match(effects[1][1].message, /has not been stopped or reloaded/);
 });
 
 function createContents() {
@@ -1438,7 +1460,7 @@ test("a live helper retains exclusive ownership of its running turn", async () =
   );
 });
 
-test("a replacement helper takes over only after the previous owner exited", async () => {
+test("a replacement helper cannot reuse an uncertain page after its previous observer exited", async () => {
   const deadPid = 2_147_483_647;
   const tab = {
     id: "tab-dead-owner",
@@ -1468,18 +1490,13 @@ test("a replacement helper takes over only after the previous owner exited", asy
     logger: { info() {}, warn: (event, detail) => warnings.push([event, detail]) },
   });
 
-  const lease = await BrowserHost.prototype.beginTurn.call(fixture, tab.traceId, false, process.pid);
-
-  assert.deepEqual(lease, {
-    surfaceId: tab.surfaceId,
-    tabId: tab.id,
-    reused: false,
-    connectorBound: false,
-  });
-  assert.equal(tab.helperPid, process.pid);
-  assert.equal(warnings.length, 1);
-  assert.equal(warnings[0][0], "browser.stale_turn_owner_replaced");
-  assert.equal(warnings[0][1].previousHelperPid, deadPid);
+  await assert.rejects(BrowserHost.prototype.beginTurn.call(fixture, tab.traceId, false, process.pid),
+    error => error.code === "chatgpt_submission_outcome_unknown");
+  assert.equal(tab.helperPid, deadPid);
+  assert.equal(tab.observationUnknown, true);
+  assert.equal(tab.resumeEligible, false);
+  assert.equal(tab.status, "running");
+  assert.equal(warnings.length, 0);
 });
 
 test("a live turn heartbeat refreshes its lease and rejects another helper", () => {
@@ -1726,11 +1743,12 @@ test("hard refresh ignores an old loading stop before its own main-frame navigat
   assert.equal(contents.listenerCount("did-finish-load"), 0);
 });
 
-test("hard refresh timeout cannot become success when stopping emits did-stop-loading", async () => {
+test("an explicit hard refresh timeout never stops the still-loading webpage", async () => {
   const contents = new EventEmitter();
   contents.isDestroyed = () => false;
   contents.reloadIgnoringCache = () => {};
-  contents.stop = () => contents.emit("did-stop-loading");
+  let stops = 0;
+  contents.stop = () => { stops += 1; contents.emit("did-stop-loading"); };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     view: { webContents: contents },
     setState() {},
@@ -1740,8 +1758,9 @@ test("hard refresh timeout cannot become success when stopping emits did-stop-lo
   try {
     await assert.rejects(
       fixture.hardRefreshHome(5),
-      /ChatGPT hard refresh did not finish within 60 seconds/,
+      /ChatGPT hard refresh could not be confirmed/,
     );
+    assert.equal(stops, 0);
   } finally {
     clearTimeout(keepTestAlive);
   }

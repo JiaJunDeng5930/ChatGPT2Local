@@ -11,9 +11,24 @@ const { linuxDesktopEntry, requireAutostartState } = require("../electron/autost
 const {
   MAX_RESTARTS_PER_WINDOW,
   RuntimeSupervisor,
+  observeBootStartedAt,
+  runtimeOwnershipPredatesCurrentBoot,
   managedTunnelConnectArgs,
   validateConfig,
 } = require("../electron/runtime-supervisor.cjs");
+
+test("unavailable boot-time evidence preserves ownership instead of crashing or declaring a process stale", () => {
+  assert.equal(observeBootStartedAt(() => 100_000, () => 5), 95_000);
+  assert.equal(observeBootStartedAt(() => 100_000, () => { throw new Error("uv_uptime EPERM"); }), undefined);
+  for (const invalid of [-1, NaN, Infinity, "5"]) {
+    assert.equal(observeBootStartedAt(() => 100_000, () => invalid), undefined);
+  }
+  const old = { updatedAt: new Date(1_000).toISOString() };
+  assert.equal(runtimeOwnershipPredatesCurrentBoot(old, 100_000), true);
+  assert.equal(runtimeOwnershipPredatesCurrentBoot(old, null), false);
+  assert.equal(runtimeOwnershipPredatesCurrentBoot(old, NaN), false);
+  assert.equal(runtimeOwnershipPredatesCurrentBoot({ updatedAt: "not a date" }, 100_000), false);
+});
 
 async function freePort() {
   return await new Promise((resolve, reject) => {
