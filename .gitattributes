@@ -1,0 +1,4 @@
+# Portable proof receipts compare actual bytes across the CI platform matrix.
+bend/** text eol=lf
+src/verified/** text eol=lf
+scripts/*bend* text eol=lf

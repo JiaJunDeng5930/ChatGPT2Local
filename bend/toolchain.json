@@ -1,0 +1,14 @@
+{
+  "compiler_version": "bend 2.0.27",
+  "base_sha256": "90a4a9a4ec3997d7d4927d7dac04f9ddd3b884e6521ac9d691bfe6765ba0d4d7",
+  "pure_success": "All terms check.",
+  "targets": ["javascript", "native-c"],
+  "release": "v2.0.27",
+  "release_metadata": "https://api.github.com/repos/bendlang/bend/releases/tags/v2.0.27",
+  "archives": {
+    "darwin-arm64": "de1f0a8b8db18c336edfb9385234b34f7da60fa4c79a4261e3be4a9674a2ffd7",
+    "darwin-x64": "fcde1f2a17939b1cbef1369a32c13ffdb7cef53a8355e9cf3887b119c79fa17a",
+    "linux-arm64": "2535c11bf554639cd90e634248915c597a06f40753ce28dea5fc71f7a6cf9703",
+    "linux-x64": "58adc86af6605ed0c48f7d84e4c23028f78893ce4a867a20a4f004b11582687b"
+  }
+}
