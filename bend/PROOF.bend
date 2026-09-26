@@ -1,6 +1,7 @@
 import Base
 import ./turn-proof.bend as Turn
 import ./history-proof.bend as History
+import ./transcript-proof.bend as Transcript
 import ./trace-proof.bend as Trace
 import ./batch-proof.bend as Batch
 import ./observation-proof.bend as Observation

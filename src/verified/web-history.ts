@@ -85,7 +85,7 @@ export interface WebHistoryPlan {
 function decodeReceipt(text: string, scope: string): Receipt {
   const value = JSON.parse(text) as Partial<Receipt>;
   const hash = (x: unknown): x is string => typeof x === "string" && /^[a-f0-9]{64}$/.test(x);
-  if (!value || value.version !== 1 || value.scope !== scope || typeof value.operation !== "string"
+  if (!value || value.version !== 1 || value.scope !== scope || typeof value.operation !== "string" || !value.operation
     || !hash(value.key) || !hash(value.environment) || !hash(value.answerDigest)
     || !Array.isArray(value.messages) || !value.messages.every(hash)) {
     throw new Error("Invalid browser history receipt; continuation requires reconciliation");
@@ -100,13 +100,29 @@ export class WebHistoryStore {
 
   select(scope: string, operation: string, parsed: CodexParsedRequest): WebHistoryPlan {
     const directory = this.directory(scope);
-    const receipts = existsSync(directory) ? readdirSync(directory).filter(name => /^[a-f0-9]{64}\.json$/.test(name))
-      .map(name => decodeReceipt(readFileSync(join(directory, name), "utf8"), scope)) : [];
-    const selection = selectHistory(receipts, historyEnvironment(parsed), historyMessages(parsed));
+    const receipts = new Map(existsSync(directory)
+      ? readdirSync(directory).filter(name => /^[a-f0-9]{64}\.json$/.test(name)).map(name => {
+        const receipt = decodeReceipt(readFileSync(join(directory, name), "utf8"), scope);
+        const identity = name.slice(0, -5);
+        if (identity !== digest(receipt.operation)) {
+          throw new Error("Browser history receipt identity does not match its durable filename");
+        }
+        return [identity, receipt] as const;
+      })
+      : []);
+    // A page key is a lineage, not a completion identity. Feed the immutable
+    // receipt identity to Bend and look up exactly that receipt afterwards;
+    // matching only page key + length could pick a different environment or
+    // branch from the same page and silently change the selected evidence.
+    const selection = selectHistory([...receipts].map(([key, receipt]) => ({
+      key, environment: receipt.environment, messages: receipt.messages,
+    })), historyEnvironment(parsed), historyMessages(parsed));
     if (selection) {
-      const receipt = receipts.find(item => item.key === selection.key && item.messages.length === selection.offset);
-      if (!receipt) throw new Error("Bend selected a history receipt that was not loaded");
-      return { key: selection.key, offset: selection.offset,
+      const receipt = receipts.get(selection.key);
+      if (!receipt || receipt.messages.length !== selection.offset) {
+        throw new Error("Bend selected a history receipt that was not loaded");
+      }
+      return { key: receipt.key, offset: selection.offset,
         expectedAnswerDigest: receipt.answerDigest, expectedOperation: receipt.operation };
     }
     return { key: digest(canonicalJson(["web-history-v1", scope, operation])) };

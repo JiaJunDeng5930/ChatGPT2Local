@@ -59,7 +59,8 @@ def check_boundaries() -> None:
                                  ("batch-specification", "batch"), ("observation-specification", "observation"),
                                  ("surface-specification", "surface"), ("broker-specification", "broker"),
                                  ("progress-specification", "progress"), ("outbox-specification", "outbox"),
-                                 ("replay-specification", "replay"), ("lease-specification", "lease")]:
+                                 ("replay-specification", "replay"), ("lease-specification", "lease"),
+                                 ("transcript-specification", "transcript")]:
         if (BEND / f"{implementation}.bend").resolve() in closure(BEND / f"{spec}.bend"):
             raise RuntimeError(f"specification depends on its implementation: {spec}")
 

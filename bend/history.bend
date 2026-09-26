@@ -1,4 +1,5 @@
 import Base
+import ./history-domain.bend as D
 
 # Histories are ordered words of canonical semantic messages, not API round
 # counts and not the index of the last assistant message. Only a confirmed
@@ -27,43 +28,36 @@ def plan(known_environment: String, environment: String,
          known: List<&2, String>, incoming: List<&2, String>) -> Maybe<&2, Nat>:
   with_envelope(String.eq(known_environment, environment), reconcile(known, incoming))
 
-type Receipt is Data:
-  Receipt{key: String, environment: String, messages: List<&2, String>}
-
-type Selection is Data:
-  NewConversation{}
-  ReuseConversation{key: String, offset: Nat}
-
 # Choosing a receipt is a pure application decision. An exact but empty suffix
 # is NOT a new browser turn: the operation journal owns such replay requests.
-def eligible(valid: Bool, key: String, offset: Nat) -> Selection:
+def eligible(valid: Bool, key: String, offset: Nat) -> D.Selection:
   match valid:
-    case False{}: NewConversation{}
-    case True{}: ReuseConversation{key, offset}
+    case False{}: D.NewConversation{}
+    case True{}: D.ReuseConversation{key, offset}
 
-def candidate(offset: Maybe<&2, Nat>, key: String, length: Nat) -> Selection:
+def candidate(offset: Maybe<&2, Nat>, key: String, length: Nat) -> D.Selection:
   match offset:
-    case None{}: NewConversation{}
+    case None{}: D.NewConversation{}
     case Some{+n}:
       eligible(Bool.and(Nat.is_gt(n, 0n), Nat.is_lt(n, length)), key, n)
 
-def prefer(left: Bool, a: Selection, b: Selection) -> Selection:
+def prefer(left: Bool, a: D.Selection, b: D.Selection) -> D.Selection:
   match left:
     case True{}: a
     case False{}: b
 
-def longer(a: Selection, b: Selection) -> Selection:
+def longer(a: D.Selection, b: D.Selection) -> D.Selection:
   match a b:
-    case NewConversation{} _: b
-    case ReuseConversation{k, n} NewConversation{}: ReuseConversation{k, n}
-    case ReuseConversation{+ka, +na} ReuseConversation{+kb, +nb}:
+    case D.NewConversation{} _: b
+    case D.ReuseConversation{k, n} D.NewConversation{}: D.ReuseConversation{k, n}
+    case D.ReuseConversation{+ka, +na} D.ReuseConversation{+kb, +nb}:
       prefer(Bool.or(Nat.is_gt(na, nb), Bool.and(Nat.is_eq(na, nb), String.is_le(ka, kb))),
-        ReuseConversation{ka, na}, ReuseConversation{kb, nb})
+        D.ReuseConversation{ka, na}, D.ReuseConversation{kb, nb})
 
-def select(receipts: List<Receipt>, +environment: String,
-           +incoming: List<&2, String>, +length: Nat) -> Selection:
+def select(receipts: List<&2, D.Receipt>, +environment: String,
+           +incoming: List<&2, String>, +length: Nat) -> D.Selection:
   match receipts:
-    case Nil{}: NewConversation{}
-    case Con{Receipt{key, old_environment, known}, rest}:
+    case Nil{}: D.NewConversation{}
+    case Con{D.Receipt{key, old_environment, known}, rest}:
       longer(candidate(plan(old_environment, environment, known, incoming), key, length),
         select(rest, environment, incoming, length))

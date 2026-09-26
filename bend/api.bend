@@ -2,6 +2,7 @@ import Base
 import ./domain.bend as D
 import ./kernel.bend as K
 import ./history.bend as H
+import ./history-domain.bend as HD
 import ./transcript.bend as T
 import ./surface.bend as Surface
 import ./surface-domain.bend as SD
@@ -27,8 +28,8 @@ def history_plan(old_environment: String, environment: String,
                  known: List<&2, String>, incoming: List<&2, String>) -> Maybe<&2, Nat>:
   H.plan(old_environment, environment, known, incoming)
 
-def history_select(receipts: List<H.Receipt>, environment: String,
-                   +incoming: List<&2, String>) -> H.Selection:
+def history_select(receipts: List<&2, HD.Receipt>, environment: String,
+                   +incoming: List<&2, String>) -> HD.Selection:
   H.select(receipts, environment, incoming, List.length(&2, String, incoming))
 
 def transcript_item(kind: String, role: String) -> Bool:
@@ -122,7 +123,7 @@ def replay_run(events: List<&2, RP.Event>, state: RP.State) -> List<&2, RP.Decis
 # The compiler requires a printable entry. This only establishes export roots;
 # the host invokes the real public functions above, never this smoke value.
 type Exports is Data:
-  Exports{turn: D.Decision, prefix: Maybe<&2, Nat>, history: H.Selection,
+  Exports{turn: D.Decision, prefix: Maybe<&2, Nat>, history: HD.Selection,
           transcript: Bool, surface: Bool, lease: LD.Decision, admission: LD.Admission, batch: BD.Decision, restored: BD.State,
           batch_decision: BD.Decision, batch_acknowledgement: BD.Decision,
           observation: OD.Decision, eligible_observation: Bool,

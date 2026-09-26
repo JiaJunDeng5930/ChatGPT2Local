@@ -1,4 +1,4 @@
-// Generated from Bend; do not edit. Source/toolchain/glue SHA256: b9b26e3b39f414908c60c410a7b97348734eefa7d745219729da9180e300598d
+// Generated from Bend; do not edit. Source/toolchain/glue SHA256: 47881193721221556f0f32728a3192c17dc06d161acfb2438684def0cc619dc8
 "use strict";
 function word_to_u32(w) {
   let x = 0;
@@ -437,21 +437,9 @@ function $List$length$(_xs_0) {
 }
 
 function $transcript$round_item$(_kind_0, _role_0) {
-  const _x_0 = run_loop($String$eq$(_kind_0, "custom_tool_call_output"));
-  const _x_1 = run_loop($String$eq$(_kind_0, "tool_search_output"));
-  const _x_2 = run_loop($String$eq$(_kind_0, "function_call_output"));
-  const _x_3 = (_x_0 || _x_1);
-  const _x_4 = run_loop($String$eq$(_kind_0, "tool_search_call"));
-  const _x_5 = (_x_2 || _x_3);
-  const _x_6 = run_loop($String$eq$(_kind_0, "custom_tool_call"));
-  const _x_7 = (_x_4 || _x_5);
-  const _x_8 = run_loop($String$eq$(_kind_0, "function_call"));
-  const _x_9 = (_x_6 || _x_7);
-  const _x_10 = run_loop($String$eq$(_kind_0, "reasoning"));
-  const _x_11 = (_x_8 || _x_9);
-  const _x_12 = run_loop($Bool$and$(run_loop($String$eq$(_kind_0, "message")), run_loop($String$eq$(_role_0, "assistant"))));
-  const _x_13 = (_x_10 || _x_11);
-  return (_x_12 || _x_13);
+  const _x_0 = run_loop($Bool$and$(run_loop($String$eq$(_kind_0, "message")), run_loop($String$eq$(_role_0, "assistant"))));
+  const _x_1 = run_loop($transcript$protocol_item$(_kind_0));
+  return (_x_0 || _x_1);
 }
 
 function $surface$resume$(_evidence_0) {
@@ -898,6 +886,23 @@ function $Bool$and$(_a_0, _b_0) {
   } else {
     return _b_0;
   }
+}
+
+function $transcript$protocol_item$(_kind_0) {
+  const _x_0 = run_loop($String$eq$(_kind_0, "tool_search_output"));
+  const _x_1 = run_loop($String$eq$(_kind_0, "custom_tool_call_output"));
+  const _x_2 = (_x_0 || false);
+  const _x_3 = run_loop($String$eq$(_kind_0, "function_call_output"));
+  const _x_4 = (_x_1 || _x_2);
+  const _x_5 = run_loop($String$eq$(_kind_0, "tool_search_call"));
+  const _x_6 = (_x_3 || _x_4);
+  const _x_7 = run_loop($String$eq$(_kind_0, "custom_tool_call"));
+  const _x_8 = (_x_5 || _x_6);
+  const _x_9 = run_loop($String$eq$(_kind_0, "function_call"));
+  const _x_10 = (_x_7 || _x_8);
+  const _x_11 = run_loop($String$eq$(_kind_0, "reasoning"));
+  const _x_12 = (_x_9 || _x_10);
+  return (_x_11 || _x_12);
 }
 
 function $surface$authorized$(_present_0, _untouched_0, _idle_0, _tail_0, _key_matches_0, _operation_matches_0, _receipt_matches_0, _live_matches_0) {
@@ -2688,5 +2693,5 @@ module.exports = Object.freeze({
   phases: Object.freeze(["Fresh", "Prepared", "Attempted", "Running", "Unknown", "Completed", "Cancelled"]),
   events: Object.freeze(["Prepare", "Submit", "Accepted", "Finished", "Uncertain", "Attach", "Detach", "Recover", "UserCancel"]),
   effects: Object.freeze(["PrepareSurface", "SendPrompt", "ObserveOnly", "PublishFinal", "ReplayFinal", "StopByUser", "NoEffect", "Reject"]),
-  fingerprint: "b9b26e3b39f414908c60c410a7b97348734eefa7d745219729da9180e300598d",
+  fingerprint: "47881193721221556f0f32728a3192c17dc06d161acfb2438684def0cc619dc8",
 });
