@@ -9,7 +9,31 @@ permissions:
   contents: read
 
 jobs:
+  bend-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Install pinned Bend compiler
+        run: python scripts/setup-bend.py
+      - name: Check proofs, semantic mutations, and every native export
+        run: python scripts/verify-bend.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bend-proof
+          path: .cache/bend/proof-receipt.json
+          include-hidden-files: true
+          if-no-files-found: error
+
   verify:
+    needs: bend-proof
+    env:
+      BEND_PROOF_RECEIPT: ${{ github.workspace }}/.cache/bend/proof-receipt.json
     strategy:
       fail-fast: false
       matrix:
@@ -17,6 +41,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          name: bend-proof
+          path: .cache/bend
       - name: Validate launcher installer with Windows PowerShell 5.1
         if: runner.os == 'Windows'
         shell: powershell

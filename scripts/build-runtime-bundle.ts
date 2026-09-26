@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { VERSION } from "../src/version";
+import { verifyBendBuild } from "./verify-bend-build";
 
 const root = resolve(import.meta.dir, "..");
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
@@ -48,10 +49,17 @@ const appDir = join(output, "app");
 const runtimeDir = join(output, "runtime");
 const binDir = join(output, "bin");
 
+// Even an existing binary or generated CJS file cannot bypass this gate.
+verifyBendBuild();
 rmSync(output, { recursive: true, force: true });
 mkdirSync(appDir, { recursive: true });
 mkdirSync(runtimeDir, { recursive: true });
 mkdirSync(binDir, { recursive: true });
+// Electron uses the exact same proof-checked library as the bundled TS adapters.
+copyFileSync(join(root, "src", "verified", "generated", "core.cjs"), join(appDir, "verified-core.cjs"));
+if (process.env.BEND_PROOF_RECEIPT) {
+  copyFileSync(resolve(process.env.BEND_PROOF_RECEIPT), join(output, "bend-proof-receipt.json"));
+}
 
 const build = await Bun.build({
   entrypoints: [join(root, "src", "cli.ts")],
