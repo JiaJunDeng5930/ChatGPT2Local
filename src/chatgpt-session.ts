@@ -2,36 +2,27 @@ import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 
 export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
-export const CHATGPT_COMPOSER_SELECTOR = [
-  '[data-testid="prompt-textarea"]',
-  "#prompt-textarea",
-  '[contenteditable="true"][data-lexical-editor="true"]',
-].join(", ");
-export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
-  'button[aria-haspopup="menu"][data-tone="neutral"]',
-  'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
-].join(", ");
-export const CHATGPT_EFFORT_MENU_SELECTOR = [
-  '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
-  '[role="menu"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
-  '[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
-].join(", ");
+export const CHATGPT_COMPOSER_SELECTOR = 'form[data-chatgpt-composer] [data-composer-markdown][contenteditable="true"][role="textbox"]';
+export const CHATGPT_EFFORT_CONTROL_SELECTOR = 'button[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"][aria-haspopup="menu"]';
+export const CHATGPT_EFFORT_MENU_SELECTOR = '[role="menu"]:has([data-model-picker-power-slider])';
 export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
-export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider]';
-export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"]';
+export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-picker-power-slider]';
+export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-picker-power-slider] [role="slider"]';
 export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
-export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
-export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
-export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
-  '[data-testid^="conversation-turn-"][data-turn="assistant"]',
-  '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
-  '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
-].join(", ");
-export const CHATGPT_USER_TURN_SELECTOR = [
-  '[data-testid^="conversation-turn-"][data-turn="user"]',
-  '[data-testid^="conversation-turn-"][data-message-author-role="user"]',
-  '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"])',
-].join(", ");
+/** Resolve inside the active composer's form; multiple submitters are an error. */
+export const CHATGPT_SEND_BUTTON_SELECTOR = 'button[type="submit"]';
+export const CHATGPT_STOP_BUTTON_SELECTOR = 'form[data-chatgpt-composer] button[type="button"][aria-label="Stop"]';
+// User and assistant footers share this class. Completion must follow the final answer.
+export const CHATGPT_COMPLETION_ACTION_SELECTOR = '.turn-action-controls button';
+export const CHATGPT_ASSISTANT_TURN_SELECTOR = '[data-turn-key]:has([data-conversation-role="assistant"], [data-chatgpt-agent-turn-start])';
+export const CHATGPT_USER_TURN_SELECTOR = '[data-turn-key]:has([data-user-message-bubble])';
+
+/** Both logical roles belong to the same stable renderer group. */
+export function chatGptAssistantTurnSelector(identity: string): string {
+  const prefix = "group:assistant:";
+  if (!identity.startsWith(prefix)) throw new Error("ChatGPT assistant identity is not a renderer group");
+  return `[data-turn-key=${JSON.stringify(identity.slice(prefix.length))}]:has([data-conversation-role="assistant"], [data-chatgpt-agent-turn-start])`;
+}
 
 export interface ChatGptEffortSliderState {
   min: number;
@@ -47,7 +38,7 @@ export interface ChatGptEffortActivation {
 }
 
 export function chatGptEffortSlider(page: Page): { sliderContainer: Locator; slider: Locator } {
-  const sliderContainer = page.locator(CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR).filter({ visible: true }).last();
+  const sliderContainer = page.locator(CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR).filter({ visible: true });
   // The current picker keeps ARIA values on a zero-width, aria-hidden semantic input.
   // Its visible container proves the active surface; the input proves the effort range.
   return { sliderContainer, slider: sliderContainer.locator('[role="slider"]') };
@@ -60,7 +51,9 @@ function effortMenuSelectorForId(menuId: string): string {
 export async function chatGptEffortMenuForControl(page: Page, control: Locator): Promise<Locator> {
   const menuId = await control.getAttribute("aria-controls").catch(() => null);
   if (menuId) return page.locator(effortMenuSelectorForId(menuId));
-  return page.locator(CHATGPT_EFFORT_MENU_SELECTOR).filter({ visible: true }).last();
+  const controlId = await control.getAttribute("id").catch(() => null);
+  if (controlId) return page.locator(`[role="menu"][aria-labelledby~=${JSON.stringify(controlId)}]`).filter({ visible: true });
+  return page.locator(CHATGPT_EFFORT_MENU_SELECTOR).filter({ visible: true });
 }
 
 async function visibleEffortSurface(
@@ -181,15 +174,15 @@ export async function detectChatGptAccountCapabilities(
   options: { selectorTimeoutMs?: number; stableAbsenceMs?: number } = {},
 ): Promise<ChatGptWebAccountCapabilities & { extraHighAvailable: boolean }> {
   const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
-  const composer = composers.last();
+  const composer = composers;
   const composerForm = composer.locator("xpath=ancestor::form[1]");
-  const effortButton = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
+  const effortButton = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
   const deadline = Date.now() + (options.selectorTimeoutMs ?? 30_000);
   const stableAbsenceMs = options.stableAbsenceMs ?? 3_000;
   let absenceSince: number | undefined;
   let presenceObservations = 0;
   while (true) {
-    const effortVisible = await effortButton.isVisible().catch(() => false);
+    const effortVisible = await effortButton.isVisible();
     if (effortVisible) {
       presenceObservations += 1;
       absenceSince = undefined;
@@ -203,13 +196,15 @@ export async function detectChatGptAccountCapabilities(
     const documentReady = await page.evaluate(() => document.readyState === "complete").catch(() => false);
     if (composerReady && formReady && documentReady) {
       absenceSince ??= Date.now();
-      if (Date.now() - absenceSince >= stableAbsenceMs) {
-        return { solAvailable: false, extraHighAvailable: false, proAvailable: false };
-      }
     } else {
       absenceSince = undefined;
     }
     if (Date.now() >= deadline) {
+      // ChatGPT can mount a usable composer before the account's model list arrives.
+      // A short absence is not a capability result; use the complete inspection budget.
+      if (absenceSince !== undefined && Date.now() - absenceSince >= stableAbsenceMs) {
+        return { solAvailable: false, extraHighAvailable: false, proAvailable: false };
+      }
       throw new Error("ChatGPT account capability probe did not reach a stable composer state");
     }
     await new Promise(resolveSleep => setTimeout(resolveSleep, 100));

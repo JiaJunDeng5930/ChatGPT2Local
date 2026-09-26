@@ -91,32 +91,22 @@ test("conversation turn identity survives ChatGPT DOM virtualization", () => {
 });
 
 test("submission DOM tracks logical identities and retains virtualized history in its baseline", async () => {
-  type Turn = { id: string; index: number; role: "user" | "assistant"; mounted: boolean };
+  type Turn = { id: string; index: number; mounted: boolean };
   let turns: Turn[] = [
-    { id: "old-user", index: 1, role: "user", mounted: false },
-    { id: "old-answer", index: 2, role: "assistant", mounted: false },
-    { id: "current-user", index: 3, role: "user", mounted: true },
-    { id: "current-answer", index: 4, role: "assistant", mounted: true },
+    { id: "old", index: 1, mounted: false },
+    { id: "current", index: 2, mounted: true },
   ];
   const observers: (() => void)[] = [];
-  const element = (turn: Turn, container: boolean) => ({
-    getAttribute: (name: string) => ({
-      "data-turn-id": container ? null : turn.id,
-      "data-turn-id-container": turn.id,
-      "data-testid": container ? null : `conversation-turn-${turn.index}`,
-    })[name],
-    parentElement: { closest: () => container ? null : element(turn, true) },
+  const element = (turn: Turn) => ({
+    getAttribute: (name: string) => name === "data-turn-key" ? turn.id : null,
+    querySelector: () => turn.mounted ? {} : null,
   });
   const context = createContext({
     performance: { timeOrigin: 1 },
     document: {
       documentElement: {},
       querySelectorAll: (selector: string) => {
-        if (selector === "[data-turn-id-container]") {
-          return turns.flatMap(turn => [element(turn, true), ...(turn.mounted ? [element(turn, false)] : [])]);
-        }
-        const role = selector.includes('="assistant"') ? "assistant" : selector.includes('="user"') ? "user" : undefined;
-        return turns.filter(turn => turn.mounted && turn.role === role).map(turn => element(turn, false));
+        return selector === "[data-turn-key]" ? turns.map(element) : [];
       },
     },
     MutationObserver: class {
@@ -134,19 +124,19 @@ test("submission DOM tracks logical identities and retains virtualized history i
     submissionDomState(page: Page, cache: unknown): Promise<{ responseIdentities: string[] }>;
   };
   const baseline = await worker.captureSubmissionBaseline(page);
-  expect([...baseline.initialTurnIdentities]).toEqual(turns.map(turn => turn.id));
+  expect([...baseline.initialTurnIdentities]).toEqual(turns.flatMap(turn => [`group:user:${turn.id}`, `group:assistant:${turn.id}`]));
   // A renderer update renumbers existing nodes and mounts old history, without a new submission.
   turns = turns.map(turn => ({ ...turn, index: turn.index + 2, mounted: true }));
   observers.forEach(notify => notify());
   expect(await worker.currentSubmissionEvidence(page, baseline)).toBeUndefined();
   expect([...(await worker.submissionDomState(page, baseline.domCache)).responseIdentities])
-    .toEqual(["old-answer", "current-answer"]);
+    .toEqual(["group:assistant:old", "group:assistant:current"]);
   expect(baseline.domCache.fullScans).toBe(2);
   // Changing a logical ID invalidates the cached snapshot; its display index is not authority.
-  turns[2] = { ...turns[2]!, id: "new-user" };
+  turns[1] = { ...turns[1]!, id: "new" };
   observers.forEach(notify => notify());
   expect(await worker.currentSubmissionEvidence(page, baseline)).toBe("user_turn");
-  turns.push({ ...turns[3]!, index: 20 });
+  turns.push({ ...turns[1]!, index: 20 });
   observers.forEach(notify => notify());
   await expect(worker.submissionDomState(page, baseline.domCache)).rejects.toThrow("duplicate");
 });
@@ -191,7 +181,7 @@ test("response caching rechecks CSS visibility without requiring a DOM mutation"
   });
   try {
     for (const target of ["answer", "copy"]) {
-      const window = createWindow('<article id="old"><button data-testid="copy-turn-action-button">Copy</button></article><article id="turn"><div class="markdown" id="answer">CODEX WEB GPT READY</div><button id="copy" data-testid="copy-turn-action-button">Copy</button></article>');
+      const window = createWindow('<div data-turn-key="old"><div class="turn-action-controls"><button>Copy</button></div></div><div data-turn-key="current" id="turn"><div data-content-search-unit-key="current:assistant"><h4 data-conversation-role="assistant"></h4><div data-markdown-text-style="assistant-message" id="answer">CODEX WEB GPT READY</div><div class="turn-action-controls"><button id="copy">Copy</button></div></div></div>');
       let visible = false;
       const context = createContext({
         document: window.document, HTMLElement: window.HTMLElement, Element: window.Element, Node: window.Node,
@@ -541,7 +531,7 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     },
   };
   worker.activeComposer = async () => ({
-    locator: () => ({ getByTestId: () => sendButton }),
+    locator: () => ({ locator: () => sendButton }),
   });
   worker.waitForSubmissionAccepted = async () => "user_turn";
 
@@ -803,7 +793,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
-    getAttribute: async (name: string) => name === "data-highlighted" ? "" : null,
+    getAttribute: async (name: string) => name === "aria-current" ? "true" : null,
   };
   const selectedConnector = {
     waitFor: async () => {
@@ -814,7 +804,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   };
   const selectedComposer = {
     locator: (selector: string) => {
-      expect(selector).toBe('[data-id^="plugin:"][data-keyword]');
+      expect(selector).toBe('[app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]');
       return {
         filter: (options: { hasText: string; visible: boolean }) => {
           expect(options).toEqual({ hasText: "Codex Native2", visible: true });
@@ -844,7 +834,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
       return { exactConnectorLabel: true };
     },
     locator: (selector: string) => {
-      if (selector.includes("__menu-item")) {
+      if (selector.includes("data-list-navigation-item")) {
         return {
           evaluateAll: async () => [],
           filter: (options: { has: unknown }) => {
@@ -891,7 +881,7 @@ test("connector selection moves highlight to the exact hidden-viewport row befor
   const appResult = {
     waitFor: async () => {},
     count: async () => 1,
-    getAttribute: async () => arrowCount >= 2 ? "" : null,
+    getAttribute: async () => arrowCount >= 2 ? "true" : null,
   };
   const menuRows = {
     evaluateAll: async () => [],
@@ -1033,7 +1023,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
       calls.push(["connectorMenu"]);
     },
     count: async () => 1,
-    getAttribute: async (name: string) => name === "data-highlighted" ? "" : null,
+    getAttribute: async (name: string) => name === "aria-current" ? "true" : null,
   };
   const selectedComposer = {
     focus: async (options?: { signal?: AbortSignal }) => {
@@ -1073,7 +1063,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const page = {
     getByRole: personalizedTemporaryChatRole,
     getByText: () => ({ exactConnectorLabel: true }),
-    locator: (selector: string) => selector.includes("__menu-item")
+    locator: (selector: string) => selector.includes("data-list-navigation-item")
       ? { filter: () => appResult, evaluateAll: async () => [] }
       : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
   };
@@ -1159,7 +1149,7 @@ test("an aborted connector proof preserves its mention before the preflight rele
     getByRole: () => absent,
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => {
-      expect(selector).toContain("__menu-item");
+      expect(selector).toContain("data-list-navigation-item");
       return menuRows;
     },
   };
@@ -1202,7 +1192,7 @@ test("a lost connector mention cannot be used as evidence to change personalizat
     getByRole: () => absent,
     getByText: () => ({}),
     locator: (selector: string) => {
-      if (selector.includes("__menu-item")) return { filter: () => ({ waitFor: async () => { throw timeout; } }) };
+      if (selector.includes("data-list-navigation-item")) return { filter: () => ({ waitFor: async () => { throw timeout; } }) };
       stateReads += 1;
       throw new Error("Personalization must not be inferred from a lost input");
     },
@@ -1252,7 +1242,7 @@ test("an aborted real connector selection preserves the typed mention", async ()
     getByRole: personalizedTemporaryChatRole,
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => {
-      expect(selector).toContain("__menu-item");
+      expect(selector).toContain("data-list-navigation-item");
       return menuRows;
     },
   };
@@ -1312,7 +1302,7 @@ test("an abort after connector activation preserves the selected pill", async ()
   const appResult = {
     waitFor: async () => {},
     count: async () => 1,
-    getAttribute: async () => "",
+    getAttribute: async () => "true",
   };
   const menuRows = { filter: () => appResult };
   const selectedConnector = { waitFor: async () => {} };
@@ -1427,19 +1417,15 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     },
   };
   const composerForm = {
-    getByRole: (role: string, options: { name: string; exact: boolean }) => {
-      expect(role).toBe("group");
-      expect(options).toEqual({ name: "codex-input-image-1.png", exact: true });
+    locator: (selector: string) => {
+      if (selector === 'button[type="submit"]') return send;
+      expect(selector).toBe('.composer-attachment-surface:is(button, [role="button"])[aria-label="codex-input-image-1.png"]');
       return {
         waitFor: async (state: { state: string; timeout: number }) => {
           expect(state).toEqual({ state: "visible", timeout: 60_000 });
-          calls.push(["fileTile", options.name]);
+          calls.push(["fileTile", "codex-input-image-1.png"]);
         },
       };
-    },
-    getByTestId: (testId: string) => {
-      expect(testId).toBe("send-button");
-      return send;
     },
   };
   const composer = {
@@ -1459,7 +1445,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
   };
   const page = {
     locator: (selector: string) => {
-      if (selector === 'input[data-testid="upload-photos-input"]') return input;
+      if (selector === 'form[data-chatgpt-composer] input[type="file"][multiple]:not([accept])') return input;
       if (selector === '[role="alert"]') {
         return { allInnerTexts: async () => [] };
       }
@@ -1743,7 +1729,7 @@ test("a rate-limit dialog during send readiness does not fail or duplicate an ac
     },
   };
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
-    activeComposer: async () => ({ locator: () => ({ getByTestId: () => sendButton }) }),
+    activeComposer: async () => ({ locator: () => ({ locator: () => sendButton }) }),
     waitForSubmissionAccepted: async () => "user_turn",
   }) as unknown as {
     sendAttachedPrompt(page: Page, baseline: unknown): Promise<string>;

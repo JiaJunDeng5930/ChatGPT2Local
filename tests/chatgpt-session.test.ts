@@ -11,19 +11,19 @@ import {
 
 test("composer and effort selectors exclude unrelated editable fields and menu buttons", () => {
   const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
-  const document = createDocument(`<body><form>
+  const document = createDocument(`<body><form data-chatgpt-composer>
     <div contenteditable="true" id="unrelated-editor"></div>
     <textarea placeholder="Search" id="search"></textarea>
     <button aria-haspopup="menu" id="attachments"></button>
-    <div data-testid="prompt-textarea" id="composer-testid"></div>
+    <div data-composer-markdown contenteditable="true" role="textbox" id="composer"></div>
     <div id="prompt-textarea"></div>
     <div contenteditable="true" data-lexical-editor="true" id="composer-lexical"></div>
-    <button aria-haspopup="menu" data-tone="neutral" id="effort"></button>
+    <button aria-haspopup="menu" data-codex-intelligence-trigger="true" data-composer-navigation-target="reasoning" id="effort"></button>
     <button aria-haspopup="menu" data-testid="model-switcher-dropdown-button" id="model"></button>
   </form></body>`);
   const matches = (selector: string) => Array.from(document.querySelectorAll(selector)).map(element => element.id);
-  expect(matches(CHATGPT_COMPOSER_SELECTOR)).toEqual(["composer-testid", "prompt-textarea", "composer-lexical"]);
-  expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model"]);
+  expect(matches(CHATGPT_COMPOSER_SELECTOR)).toEqual(["composer"]);
+  expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort"]);
 });
 
 test("effort activation binds the owned menu after the control opens", async () => {
@@ -155,6 +155,7 @@ test("effort activation fails closed when neither event exposes a structural sur
 
 test("a complete authenticated composer with no effort selector is Luna-only", async () => {
   const effortButton = {
+    filter() { return this; },
     last() { return this; },
     isVisible: async () => false,
   };
@@ -183,6 +184,7 @@ test("a complete authenticated composer with no effort selector is Luna-only", a
 test("a transient effort control does not turn a Luna-only account into Sol", async () => {
   let visibilityReads = 0;
   const effortButton = {
+    filter() { return this; },
     last() { return this; },
     isVisible: async () => {
       visibilityReads += 1;

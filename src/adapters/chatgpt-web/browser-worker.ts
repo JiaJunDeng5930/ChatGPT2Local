@@ -57,6 +57,8 @@ import {
   CHATGPT_EFFORT_ITEM_SELECTOR,
   CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
+  CHATGPT_SEND_BUTTON_SELECTOR,
+  chatGptAssistantTurnSelector,
   CHATGPT_TEMPORARY_CHAT_URL,
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
@@ -146,6 +148,13 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "data-turn",
   "data-turn-id",
   "data-turn-id-container",
+  "data-turn-key",
+  "data-conversation-role",
+  "data-chatgpt-agent-turn-start",
+  "data-content-search-unit-key",
+  "data-user-message-bubble",
+  "data-markdown-text-style",
+  "data-markdown-text-tone",
   "disabled",
   "hidden",
   "inert",
@@ -1230,6 +1239,8 @@ interface ChatGptSubmissionBaseline {
   responseTurns: Locator;
   initialTurnIdentities: readonly string[];
   domCache: ChatGptSubmissionDomCache;
+  acceptedUserIdentity?: string;
+  submittedText?: string;
 }
 
 interface ChatGptAssistantTurnBinding {
@@ -1336,8 +1347,8 @@ export async function setChatGptThinkMode(
     const composer = composerForm.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true }).first();
     const composerState = () => composer.evaluate(element => {
       const copy = element.cloneNode(true) as HTMLElement;
-      const pills = [...copy.querySelectorAll('[data-id^="plugin:"][data-keyword]')];
-      const connectors = pills.map(pill => pill.getAttribute("data-keyword")).sort();
+      const pills = [...copy.querySelectorAll('[app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]')];
+      const connectors = pills.map(pill => pill.getAttribute("app-mention-display-name")).sort();
       for (const pill of pills) pill.remove();
       const text = element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement
         ? element.value : copy.textContent ?? "";
@@ -1351,7 +1362,7 @@ export async function setChatGptThinkMode(
     await captureDiagnostic?.("think-slash-triggered");
     // The command popup shares menu-item classes with sidebar history. Count only this popup.
     const popup = composerForm.page().locator('.popover[aria-busy="false"]').filter({ visible: true });
-    const rows = popup.locator('.__menu-item[tabindex="0"]').filter({ visible: true });
+    const rows = popup.locator('[data-mention-list-scroll-area] button[data-list-navigation-item="true"]').filter({ visible: true });
     await rows.first().waitFor({ state: "visible", timeout: 5_000, signal: abortSignal });
     if (await popup.count() !== 1 || await rows.count() !== 1) {
       throw new Error("ChatGPT Think slash menu must expose exactly one command option");
@@ -1835,10 +1846,10 @@ class ChatGptBrowserDiagnostics {
           const composers = [...document.querySelectorAll(composerSelector)].filter(rendered);
           const assistantTurns = [...document.querySelectorAll(assistantTurnSelector)].filter(rendered);
           const selectedConnectors = composers.flatMap(composer => (
-            [...composer.querySelectorAll('[data-id^="plugin:"][data-keyword]')]
+            [...composer.querySelectorAll('[app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]')]
           ))
             .filter(rendered);
-          const exactConnectorRows = [...document.querySelectorAll('.__menu-item[tabindex="0"]')]
+          const exactConnectorRows = [...document.querySelectorAll('[data-mention-list-scroll-area] button[data-list-navigation-item="true"]')]
             .filter(element => rendered(element) && exactText(element, appName));
           const currentUrl = new URL(location.href);
           const integerAttribute = (element: Element, name: string): number | null => {
@@ -1853,6 +1864,7 @@ class ChatGptBrowserDiagnostics {
               temporaryChat: currentUrl.searchParams.has("temporary-chat"),
             },
             titleChars: document.title.length,
+            documentComplete: document.readyState === "complete",
             viewport: { width: innerWidth, height: innerHeight },
             surfaceBound: typeof (globalThis as typeof globalThis & { __CODEX_WEB_GPT_SURFACE_ID__?: unknown })
               .__CODEX_WEB_GPT_SURFACE_ID__ === "string",
@@ -1869,9 +1881,25 @@ class ChatGptBrowserDiagnostics {
                 contentEditable: (element as HTMLElement).isContentEditable,
                 focused: element === document.activeElement,
               })),
+              // When recognition fails, retain structure of the unmatched controls,
+              // never their values, labels, HTML or other conversation contents.
+              unrecognizedEditors: composers.length === 0
+                ? [...document.querySelectorAll('textarea, [contenteditable="true"]')]
+                  .filter(rendered).slice(0, 10).map(element => ({
+                    tag: element.tagName.toLowerCase(),
+                    role: element.getAttribute("role"),
+                    attributes: Object.fromEntries([
+                      "id", "data-testid", "data-lexical-editor", "data-composer-markdown",
+                      "contenteditable", "placeholder", "autofocus", "disabled", "readonly",
+                    ].map(name => [name, element.hasAttribute(name)])),
+                    inForm: Boolean(element.closest("form")),
+                    inComposerForm: Boolean(element.closest("form[data-chatgpt-composer]")),
+                    focused: element === document.activeElement,
+                  }))
+                : [],
               selectedConnectorCount: selectedConnectors.length,
               exactSelectedConnectorCount: selectedConnectors.filter(
-                element => element.getAttribute("data-keyword") === appName,
+                element => (element.getAttribute("app-mention-display-name")) === appName,
               ).length,
             },
             focus: {
@@ -1908,7 +1936,7 @@ class ChatGptBrowserDiagnostics {
               assistant: assistantTurns.map(element => ({
                 textChars: (element.textContent ?? "").length,
                 htmlChars: (element as HTMLElement).innerHTML.length,
-                markdownCount: element.querySelectorAll(".markdown").length,
+                markdownCount: element.querySelectorAll('[data-markdown-text-style="assistant-message"]').length,
                 streamingStatusCount: element.querySelectorAll("[data-streaming-response-status]").length,
                 completionActionCount: element.querySelectorAll(completionActionSelector).length,
                 renderedCompletionActionCount: [...element.querySelectorAll(completionActionSelector)]
@@ -2406,7 +2434,7 @@ export class ChatGptBrowserWorker {
       if (!mode.thinkEnabled) await setChatGptThinkMode(composerForm, false, captureDiagnostic);
       return mode;
     }
-    const currentEffort = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
+    const currentEffort = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
     const effortWaitAbort = new AbortController();
     try {
       const ready = await Promise.race([
@@ -2605,12 +2633,7 @@ export class ChatGptBrowserWorker {
       });
       await captureDiagnostic?.("temporary-chat-navigation-complete");
     }
-    let composer: Locator;
-    try {
-      composer = await this.activeComposer(page);
-    } catch {
-      throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
-    }
+    const composer = await this.activeComposer(page);
     if (await dismissChatGptTemporaryChatOnboarding(page)) {
       await captureDiagnostic?.("temporary-chat-onboarding-dismissed");
     }
@@ -2779,18 +2802,21 @@ export class ChatGptBrowserWorker {
           && style.visibility !== "hidden"
           && (bounds.width > 0 || bounds.height > 0);
       };
-      // data-testid contains a display index: ChatGPT can renumber it while the same turn lives.
-      // Virtualization removes a turn's section, but retains its outer identity container.
-      const containers = [...document.querySelectorAll("[data-turn-id-container]")].filter(element =>
-        element.parentElement?.closest("[data-turn-id-container]")?.getAttribute("data-turn-id-container")
-          !== element.getAttribute("data-turn-id-container"));
-      const turnIdentities = identities(containers, "data-turn-id-container");
-      const userIdentities = identities([...document.querySelectorAll(options.userTurnSelector)], "data-turn-id");
-      const responseIdentities = identities([...document.querySelectorAll(options.assistantTurnSelector)], "data-turn-id");
-      const knownTurns = new Set(turnIdentities);
-      if ([...userIdentities, ...responseIdentities].some(identity => !knownTurns.has(identity))) {
-        throw new Error("ChatGPT conversation turn has no matching identity container");
-      }
+      // Reserve both roles even while virtualization unmounts the group's contents.
+      const turnIdentities: string[] = [];
+      const userIdentities: string[] = [];
+      const responseIdentities: string[] = [];
+      const groups = [...document.querySelectorAll("[data-turn-key]")];
+      const groupKeys = identities(groups, "data-turn-key");
+      groups.forEach((group, index) => {
+        const user = `group:user:${groupKeys[index]}`;
+        const assistant = `group:assistant:${groupKeys[index]}`;
+        // Keep both logical roles in the baseline even when virtualization unmounts their
+        // contents. Remounting an old answer must never acknowledge a new submission.
+        turnIdentities.push(user, assistant);
+        if (group.querySelector("[data-user-message-bubble]")) userIdentities.push(user);
+        if (group.querySelector('[data-conversation-role="assistant"], [data-chatgpt-agent-turn-start]')) responseIdentities.push(assistant);
+      });
       return {
         key: observerKey,
         snapshot: {
@@ -2827,12 +2853,22 @@ export class ChatGptBrowserWorker {
     signal?: AbortSignal,
   ): Promise<ChatGptSubmissionEvidence | undefined> {
     const state = await this.submissionDomState(page, baseline.domCache, signal);
-    return chatGptSubmissionEvidence({
+    const evidence = chatGptSubmissionEvidence({
       initialTurnIdentities: baseline.initialTurnIdentities,
       userIdentities: state.userIdentities,
       responseIdentities: state.responseIdentities,
       generationRunning: state.visibleStopButtonCount > 0,
     });
+    if (evidence === "user_turn") {
+      // Activity can temporarily replace this group before the assistant is mounted.
+      // Preserve the identity that acknowledged Send, independently of rendered text.
+      const identity = chatGptNewTurnIdentity(baseline.initialTurnIdentities, state.userIdentities)!;
+      if (baseline.acceptedUserIdentity && baseline.acceptedUserIdentity !== identity) {
+        throw new Error("ChatGPT changed the user turn that acknowledged the submission");
+      }
+      baseline.acceptedUserIdentity = identity;
+    }
+    return evidence;
   }
 
   private async currentSubmissionAnswerText(
@@ -2846,11 +2882,11 @@ export class ChatGptBrowserWorker {
       state.responseIdentities,
     );
     if (!identity) return "";
-    const locator = page.locator(`[data-turn-id=${JSON.stringify(identity)}]`);
+    const locator = page.locator(chatGptAssistantTurnSelector(identity));
     return (await this.responseDomSnapshot(locator, {})).visibleText;
   }
 
-  private async captureSubmissionBaseline(page: Page): Promise<ChatGptSubmissionBaseline> {
+  private async captureSubmissionBaseline(page: Page, submittedText?: string): Promise<ChatGptSubmissionBaseline> {
     const userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
     const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
     const domCache: ChatGptSubmissionDomCache = {};
@@ -2860,6 +2896,7 @@ export class ChatGptBrowserWorker {
       responseTurns,
       initialTurnIdentities: state.turnIdentities,
       domCache,
+      submittedText,
     };
   }
 
@@ -2904,7 +2941,7 @@ export class ChatGptBrowserWorker {
         && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
         const boundaryText = identity
           ? (await this.responseDomSnapshot(
-            page.locator(`[data-turn-id=${JSON.stringify(identity)}]`),
+            page.locator(chatGptAssistantTurnSelector(identity)),
             {},
           )).visibleText
           : "";
@@ -2913,9 +2950,12 @@ export class ChatGptBrowserWorker {
       }
       if (identity) return {
         identity,
-        locator: page.locator(`[data-turn-id=${JSON.stringify(identity)}]`),
+        locator: page.locator(chatGptAssistantTurnSelector(identity)),
         acceptedTurnIdentities: state.turnIdentities,
       };
+      if (state.visibleStopButtonCount > 0) {
+        responseDeadline = Math.min(deadline ?? Number.POSITIVE_INFINITY, Date.now() + graceMs);
+      }
       // A delayed renderer wake can cross the grace while the assistant appears. Only a fresh
       // observation can prove it is still missing; the explicit turn deadline remains above.
       if (Date.now() >= responseDeadline
@@ -2946,18 +2986,50 @@ export class ChatGptBrowserWorker {
     }
     const state = await this.submissionDomState(page, baseline.domCache, signal);
     const acceptedTurns = new Set(binding.acceptedTurnIdentities);
-    if (state.userIdentities.some(identity => !acceptedTurns.has(identity))) {
-      throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
-    }
     const identity = chatGptReboundTurnIdentity(
       baseline.initialTurnIdentities,
       binding.identity,
       state.responseIdentities,
     );
+    const newUsers = state.userIdentities.filter(identity => !acceptedTurns.has(identity));
+    if (newUsers.length > 0) {
+      // Activity can unmount the accepted user group while it renders a temporary
+      // assistant group. Its return must match the ID that acknowledged Send. If no
+      // user ID was observed then, require the entire submitted text instead. A
+      // surviving old group or any competing new turn remains foreign.
+      const user = newUsers[0]!;
+      const replacement = identity && newUsers.length === 1
+        && binding.identity.startsWith("group:assistant:")
+        && user.startsWith("group:user:")
+        && identity === `group:assistant:${user.slice("group:user:".length)}`
+        && !state.turnIdentities.includes(binding.identity)
+        && state.turnIdentities.every(turn => acceptedTurns.has(turn) || turn === user || turn === identity);
+      let matches = false;
+      if (replacement) {
+        const locator = page.locator(chatGptAssistantTurnSelector(identity!));
+        matches = baseline.acceptedUserIdentity
+          ? user === baseline.acceptedUserIdentity
+          : Boolean(baseline.submittedText) && await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(locator.evaluate((group, submitted) => {
+          const bubbles = group.querySelectorAll<HTMLElement>("[data-user-message-bubble]");
+          const contents = bubbles.length === 1
+            ? bubbles[0]!.querySelectorAll<HTMLElement>("[data-search-result-target]")
+            : [];
+          const normalize = (text: string) => text.replace(/\r\n?/g, "\n");
+          // The bubble also contains Show more and accessibility spacing. Only its
+          // observed message-content target represents the submitted prompt.
+          return contents.length === 1 && normalize(contents[0]!.innerText) === normalize(submitted);
+        }, baseline.submittedText!), signal));
+        if (matches) {
+          const response = await this.responseDomSnapshot(locator, {});
+          matches = response.responsePresent && response.completionActionVisible;
+        }
+      }
+      if (!matches) throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
+    }
     if (!identity || identity === binding.identity) return binding;
     return {
       identity,
-      locator: page.locator(`[data-turn-id=${JSON.stringify(identity)}]`),
+      locator: page.locator(chatGptAssistantTurnSelector(identity)),
       acceptedTurnIdentities: state.turnIdentities,
     };
   }
@@ -2967,7 +3039,7 @@ export class ChatGptBrowserWorker {
     return composer.evaluate(element => {
       const clone = element.cloneNode(true) as HTMLElement;
       clone.querySelectorAll(
-        '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]',
+        '[app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
       )
         .forEach(part => part.remove());
       return [...clone.childNodes]
@@ -3003,7 +3075,7 @@ export class ChatGptBrowserWorker {
 
   private selectedConnectorControl(composer: Locator): Locator {
     return composer
-      .locator('[data-id^="plugin:"][data-keyword]')
+      .locator('[app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]')
       .filter({ hasText: this.config.appName, visible: true });
   }
 
@@ -3011,7 +3083,7 @@ export class ChatGptBrowserWorker {
     const selected = this.selectedConnectorControl(composer);
     const keywords = await withBrowserTurnAbort(
       withChatGptBrowserObservationTimeout(selected.evaluateAll(elements => (
-        elements.map(element => element.getAttribute("data-keyword"))
+        elements.map(element => element.getAttribute("app-mention-display-name"))
       ))),
       abortSignal,
     );
@@ -3108,7 +3180,7 @@ export class ChatGptBrowserWorker {
       throwIfPromptAttachmentAborted(abortSignal);
     };
     let composer: Locator;
-    const menuRows = page.locator('.__menu-item[tabindex="0"]');
+    const menuRows = page.locator('[data-mention-list-scroll-area] button[data-list-navigation-item="true"]');
     const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
@@ -3205,10 +3277,10 @@ export class ChatGptBrowserWorker {
     // otherwise move the menu highlight until it does. Keep
     // focus on the composer, activate through the menu's real keyboard owner, then prove the exact
     // selected connector pill below.
-    const rowHighlighted = async () => await appResult.getAttribute("data-highlighted", {
+    const rowHighlighted = async () => await appResult.getAttribute("aria-current", {
       signal: abortSignal,
       timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-    }) !== null;
+    }) === "true";
     if (!await rowHighlighted()) {
       const visibleRowCount = await withBrowserTurnAbort(
         withChatGptBrowserObservationTimeout(menuRows.filter({ visible: true }).count()),
@@ -3302,7 +3374,7 @@ export class ChatGptBrowserWorker {
     const composer = await this.activeComposer(page);
     const sendButton = composer
       .locator("xpath=ancestor::form[1]")
-      .getByTestId("send-button");
+      .locator(CHATGPT_SEND_BUTTON_SELECTOR);
     await sendButton.waitFor({ state: "visible", timeout: browserStageTimeouts.send });
     await settleChatGptUi();
     const sendEnableDeadline = Date.now() + CHATGPT_SEND_ENABLE_GRACE_MS;
@@ -3564,12 +3636,12 @@ export class ChatGptBrowserWorker {
     if (files.length === 0) return;
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
-    const input = page.locator('input[data-testid="upload-photos-input"]');
+    const input = page.locator('form[data-chatgpt-composer] input[type="file"][multiple]:not([accept])');
     await input.waitFor({ state: "attached", timeout: 20_000 });
     await input.setInputFiles(files);
     try {
       await Promise.all(files.map(file => (
-        composerForm.getByRole("group", { name: file.name, exact: true })
+        composerForm.locator(`.composer-attachment-surface:is(button, [role="button"])[aria-label=${JSON.stringify(file.name)}]`)
           .waitFor({ state: "visible", timeout: 60_000 })
       )));
     } catch {
@@ -3581,7 +3653,7 @@ export class ChatGptBrowserWorker {
         + (alerts.length > 0 ? `: ${alerts.join(" | ")}` : ""),
       );
     }
-    const send = composerForm.getByTestId("send-button");
+    const send = composerForm.locator(CHATGPT_SEND_BUTTON_SELECTOR);
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       if (await send.isEnabled().catch(() => false)) return;
@@ -3636,11 +3708,12 @@ export class ChatGptBrowserWorker {
       // hidden or has no measured width. Layout geometry is therefore not response visibility:
       // completed Markdown can have width=0 while remaining connected, rendered and readable.
       const isRendered = (candidate: HTMLElement): boolean => {
-        const style = getComputedStyle(candidate);
-        return candidate.isConnected
-          && style.display !== "none"
-          && style.visibility !== "hidden"
-          && style.opacity !== "0";
+        if (!candidate.isConnected) return false;
+        for (let node: HTMLElement | null = candidate; node; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          if (node.hidden || style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+        }
+        return true;
       };
       // CSS animations and stylesheet changes can reveal an answer or its completion controls
       // without mutating this subtree. Recheck the rendering dependencies of the cached scan;
@@ -3660,30 +3733,51 @@ export class ChatGptBrowserWorker {
         return rendered;
       };
 
-      // ChatGPT's DIL renderer has no .markdown class (#538). Read its response root within the
-      // assistant-owned PUIK container; the CSS module hash is build-specific. Both renderers
-      // feed the same content serializer and completion checks below, without reading UI text.
-      const answerRootSelector = '.markdown, [data-message-author-role="assistant"] .puik-root.not-markdown > [class*="_DilResponseRoot"]';
+      // Read only assistant-owned Markdown; user messages and activity summaries share the group.
+      const answerRootSelector = '[data-markdown-text-style="assistant-message"]';
+      // In the Activity renderer, the agent-start marker owns the progress block
+      // before an assistant search unit exists. Final answers have their own unit.
+      const activityContainers = [...root.querySelectorAll<HTMLElement>("[data-chatgpt-agent-turn-start]")]
+        .map(marker => marker.parentElement!);
       // ChatGPT uses the same content renderer for intermediate commentary and for the final
       // answer. Older responses nested commentary in the streaming-status container. Pro can also
       // render a completed commentary Markdown root immediately before that live status container.
       // Final-answer Markdown follows the live status instead, so DOM order remains the semantic
       // boundary without relying on localized labels such as "Pro thinking".
       const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(answerRootSelector)]
+        .filter(candidate => {
+          if (!root.hasAttribute("data-turn-key") && !candidate.hasAttribute("data-markdown-text-style")) return true;
+          const unit = candidate.closest("[data-content-search-unit-key]");
+          return unit ? Array.from(unit.children)
+            .some(child => child.getAttribute("data-conversation-role") === "assistant")
+            : activityContainers.some(container => container.contains(candidate));
+        })
         .filter(candidate => !candidate.parentElement?.closest(answerRootSelector))
         .filter(renderedInDom);
       const streamingStatusContainers = [...root.querySelectorAll<HTMLElement>("[data-streaming-response-status]")]
         .filter(renderedInDom);
+      // Captured Activity uses the same Markdown component for public action summaries
+      // and assistant commentary, including summaries outside activity-header rows.
+      // Its explicit tone distinguishes these within the agent's progress section;
+      // a final-answer search unit remains an answer regardless of its text tone.
+      const activitySummaryRoots = new Set(allMarkdownRoots.filter(candidate => (
+        candidate.getAttribute("data-markdown-text-tone") === "tertiary"
+        && !candidate.closest("[data-content-search-unit-key]")
+        && activityContainers.some(container => container.contains(candidate))
+      )));
       // CHATGPT_COMMENTARY_CLASSIFIER_BEGIN
       // Self-contained so the test suite can execute this exact source against a synthetic DOM;
       // it must not close over anything from the surrounding evaluate scope.
       const selectChatGptAnswerRoots = (
         markdownRoots: HTMLElement[],
         statusContainers: HTMLElement[],
+        activityContainers: HTMLElement[] = [],
       ): { commentaryRoots: HTMLElement[]; answerRoots: HTMLElement[] } => {
         const firstStatusContainer = statusContainers[0];
         const commentary = markdownRoots.filter(candidate => (
-          candidate.closest("[data-streaming-response-status]") !== null
+          (!candidate.closest("[data-content-search-unit-key]")
+            && activityContainers.some(container => container.contains(candidate)))
+          || candidate.closest("[data-streaming-response-status]") !== null
           // Chain-of-thought components carry reasoning, never the final answer, so containment is
           // a position-independent commentary signal. Position alone cannot separate "commentary
           // between two status containers" from "answer between two tool calls".
@@ -3703,7 +3797,11 @@ export class ChatGptBrowserWorker {
         };
       };
       // CHATGPT_COMMENTARY_CLASSIFIER_END
-      const classified = selectChatGptAnswerRoots(allMarkdownRoots, streamingStatusContainers);
+      const classified = selectChatGptAnswerRoots(
+        allMarkdownRoots.filter(candidate => !activitySummaryRoots.has(candidate)),
+        streamingStatusContainers,
+        activityContainers,
+      );
       const commentaryRoots = classified.commentaryRoots;
       const renderedRoots = classified.answerRoots;
       // CHATGPT_MARKDOWN_CONTENT_BEGIN
@@ -3883,11 +3981,15 @@ export class ChatGptBrowserWorker {
       const candidates = new Map<HTMLElement, ChatGptVisibleTraceBlock["kind"]>();
       renderedRoots.forEach(candidate => candidates.set(candidate, "answer"));
       commentaryRoots.forEach(candidate => candidates.set(candidate, "commentary"));
+      activitySummaryRoots.forEach(candidate => candidates.set(candidate, "status"));
       const overlapsRenderedAnswer = (candidate: HTMLElement): boolean => renderedRoots.some(rendered => (
         candidate.contains(rendered) || rendered.contains(candidate)
       ));
       const overlapsCommentary = (candidate: HTMLElement): boolean => commentaryRoots.some(commentary => (
         candidate.contains(commentary) || commentary.contains(candidate)
+      ));
+      const overlapsActivitySummary = (candidate: HTMLElement): boolean => [...activitySummaryRoots].some(summary => (
+        candidate.contains(summary) || summary.contains(candidate)
       ));
       const statusSemantic = (candidate: HTMLElement): HTMLElement => {
         // Current cot-v5 action rows expose the semantic text on their item anchor while the
@@ -3941,6 +4043,7 @@ export class ChatGptBrowserWorker {
         // side to the trace stream duplicates or truncates the answer under Codex's `Working` UI.
         if (!overlapsRenderedAnswer(semantic)
           && !overlapsCommentary(semantic)
+          && !overlapsActivitySummary(semantic)
           && !candidates.has(semantic)) {
           candidates.set(semantic, "status");
         }
@@ -4366,7 +4469,7 @@ export class ChatGptBrowserWorker {
           if (index > 0) {
             await installChatGptRateLimitHandlerOnPage(page);
           }
-          let stageBaseline = await this.captureSubmissionBaseline(page);
+          let stageBaseline = await this.captureSubmissionBaseline(page, stage.text);
           await this.runStage(
             turn.traceId,
             `multipart_stage_${index + 1}_attachment`,
@@ -4457,7 +4560,7 @@ export class ChatGptBrowserWorker {
         finalPrompt = multipartFinalPrompt;
       }
 
-      let submissionBaseline = await this.captureSubmissionBaseline(page);
+      let submissionBaseline = await this.captureSubmissionBaseline(page, finalPrompt);
       await this.runStage(
         turn.traceId,
         "prompt_attachment",
