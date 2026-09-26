@@ -362,7 +362,7 @@ export type LauncherTurnActivity =
       phase: "end";
       traceId: string;
       helperPid: number;
-      status: "completed" | "failed" | "aborted";
+      status: "completed" | "failed" | "aborted" | "unknown";
       message?: string;
       retain?: boolean;
       connectorBound?: boolean;

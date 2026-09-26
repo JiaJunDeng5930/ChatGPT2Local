@@ -39,7 +39,7 @@ function refreshTurnLeasesAfterSuspension(tabs, now, bootstrapTimeoutMs) {
  */
 function shouldBlockSleepForTurns(tabs) {
   for (const tab of tabs) {
-    if (tab.status === "running") return true;
+    if (tab.status === "running" || tab.observationUnknown === true) return true;
   }
   return false;
 }

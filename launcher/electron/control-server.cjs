@@ -189,7 +189,7 @@ class BrowserControlServer {
         writeJson(response, 200, { ok: true });
         return;
       } else {
-        if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");
+        if (!['completed', 'failed', 'aborted', 'unknown'].includes(body.status)) throw new Error("turn status is invalid");
         const release = await host.endTurn(
           body.traceId,
           body.helperPid,

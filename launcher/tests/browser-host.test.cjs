@@ -2033,6 +2033,25 @@ test("a failed runtime cancellation keeps the running DOM attached", async () =>
   assert.deepEqual(closed, []);
 });
 
+test("an exited helper is not permission to take over and resubmit its active webpage", async () => {
+  const tab = {
+    id: "orphan", surfaceId: "same-surface", traceId: "orphan-trace",
+    helperPid: 2147483647, status: "running", executionActive: true,
+    view: { webContents: { isDestroyed: () => false } },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null, turnTabs: new Map([[tab.id, tab]]), userCancelledTurnOwners: new Map(),
+    syncPowerSaveBlocker() {}, publishState() {}, snapshot: () => ({ tabs: [] }), writeDescriptor() {},
+    createTurnTab: async () => { throw new Error("must never create a replacement"); },
+  });
+  await assert.rejects(BrowserHost.prototype.beginTurn.call(fixture, tab.traceId, false, process.pid),
+    error => error.code === "chatgpt_submission_outcome_unknown");
+  assert.equal(tab.helperPid, 2147483647);
+  assert.equal(tab.observationUnknown, true);
+  assert.equal(tab.resumeEligible, false);
+  assert.equal(fixture.turnTabs.get(tab.id), tab);
+});
+
 test("a later provider round reuses only its exact connector-bound conversation", async () => {
   const throttling = [];
   const conversationKey = "a".repeat(64);
@@ -2457,6 +2476,38 @@ test("failed and aborted browser turns release execution ownership but keep thei
     assert.equal(fixture.selectedTabId, tab.id);
     assert.equal(tab.status, status === "aborted" ? "aborted" : "error");
     assert.equal(closed, false);
+  }
+});
+
+test("uncertain observer settlement keeps the page awake and cannot authorize reuse", async () => {
+  const { shouldBlockSleepForTurns } = require("../electron/turn-suspension.cjs");
+  for (const report of ["unknown", "failed", "completed-with-surface-error"]) {
+    const actions = [];
+    const tab = {
+      id: `uncertain-${report}`, traceId: `trace-${report}`, helperPid: 444,
+      status: "running", executionActive: true, resumeEligible: false,
+      conversationKey: "conversation", connectorIdentity: "Codex Native2",
+      surfaceError: report === "completed-with-surface-error",
+      view: { webContents: {
+        isDestroyed: () => false,
+        setBackgroundThrottling: value => actions.push(["throttle", value]),
+        close: () => actions.push(["close"]),
+      } },
+    };
+    const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+      turnTabs: new Map([[tab.id, tab]]), closedTurnOwners: new Map(),
+      userCancelledTurnOwners: new Map(), selectedTabId: tab.id,
+      syncPowerSaveBlocker() {}, syncViewVisibility() {}, writeDescriptor() {},
+      publishState() {}, snapshot: () => ({ tabs: [] }), hide() {}, logger: { info() {} },
+    });
+    await BrowserHost.prototype.endTurn.call(fixture, tab.traceId, tab.helperPid,
+      report === "completed-with-surface-error" ? "completed" : report,
+      false, "observer disconnected", true, true);
+    assert.equal(tab.observationUnknown, true);
+    assert.equal(tab.resumeEligible, false);
+    assert.equal(shouldBlockSleepForTurns([tab]), true);
+    assert.deepEqual(actions, [["throttle", false]]);
+    assert.equal(fixture.turnTabs.get(tab.id), tab);
   }
 });
 

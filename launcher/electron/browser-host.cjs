@@ -12,6 +12,7 @@ const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { validateSessionLoginState } = require("./session-login-state.cjs");
 const { shouldBlockSleepForTurns } = require("./turn-suspension.cjs");
+const { leaseFinish, leaseAttach } = require("./verified-core.cjs");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -1453,17 +1454,24 @@ class BrowserHost {
     if (existing) {
       const wasActive = this.isTurnActive(existing);
       const reused = existing.status === "ready" && existing.resumeEligible === true;
-      if (wasActive && existing.helperPid !== helperPid) {
-        if (processRunning(existing.helperPid)) {
+      if (wasActive) {
+        const sameOwner = existing.helperPid === helperPid;
+        const admission = leaseAttach(existing.observationUnknown === true, sameOwner,
+          sameOwner || processRunning(existing.helperPid));
+        if (admission.$ === "OwnerBusy") {
           throw new Error(`ChatGPT browser turn ${traceId} is owned by another helper process`);
         }
-        this.logger.warn("browser.stale_turn_owner_replaced", {
-          tabId: existing.id,
-          traceId,
-          previousHelperPid: existing.helperPid,
-          helperPid,
-          evidence: "previous helper exited",
-        });
+        if (admission.$ === "OwnerUnknown") {
+          existing.observationUnknown = true;
+          existing.resumeEligible = false;
+          existing.message = "The observer disconnected. Inspect the existing page; it will not be stopped or submitted again.";
+          this.syncPowerSaveBlocker();
+          this.publishState?.(this.snapshot());
+          this.writeDescriptor();
+          const error = new Error(existing.message);
+          error.code = "chatgpt_submission_outcome_unknown";
+          throw error;
+        }
       }
       existing.helperPid = helperPid;
       existing.traceId = traceId;
@@ -1531,20 +1539,25 @@ class BrowserHost {
       );
     }
     const cancelledByUser = this.userCancelledTurnOwners.get(traceId) === helperPid;
-    const pageCompleted = status === "completed" && tab.surfaceError !== true;
-    tab.status = pageCompleted ? "ready" : status === "aborted" ? "aborted" : "error";
+    if (!["completed", "unknown", "failed", "aborted"].includes(status)) {
+      throw new Error("Invalid browser lease settlement report");
+    }
+    const report = cancelledByUser || status === "aborted" ? "UserCancelled" : status === "completed" ? "Completed" : "Uncertain";
+    const decision = leaseFinish({ $: report }, tab.surfaceError === true, retain === true,
+      Boolean(tab.conversationKey), Boolean(tab.connectorIdentity), connectorBound === true);
+    const pageCompleted = decision.status.$ === "Ready";
+    // Display labels are a projection. All reuse/protection decisions come from Bend.
+    tab.status = { Ready: "ready", Cancelled: "aborted", Unknown: "error" }[decision.status.$];
+    tab.observationUnknown = decision.protect;
     tab.executionActive = false;
-    tab.resumeEligible = pageCompleted
-      && retain
-      && Boolean(tab.conversationKey)
-      && (!tab.connectorIdentity || connectorBound);
+    tab.resumeEligible = decision.reusable;
     this.syncPowerSaveBlocker();
     if (pageCompleted) tab.message = "Task completed";
     else if (!tab.message || tab.message === "ChatGPT is working") {
       tab.message = message || `ChatGPT turn ${status}`;
     }
     tab.loading = false;
-    if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(true);
+    if (!tab.view.webContents.isDestroyed()) tab.view.webContents.setBackgroundThrottling(!decision.protect);
     if (pageCompleted) {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }

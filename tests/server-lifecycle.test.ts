@@ -1218,6 +1218,52 @@ test("standalone native image generation and edits preserve their upstream proto
   }
 });
 
+test("daemon shutdown detaches observers without cancelling a live webpage", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const directory = mkdtempSync(join(tmpdir(), "codex-web-shutdown-detach-"));
+  const previousTerm = new Set(process.listeners("SIGTERM"));
+  const previousInt = new Set(process.listeners("SIGINT"));
+  chatGptTurnSessions.clear();
+  let cancelled = 0;
+  let finish!: (answer: string) => void;
+  const browser = new Promise<string>(resolve => { finish = resolve; });
+  const session = chatGptTurnSessions.getOrCreate("shutdown-observer", () => ({
+    mode: "read-only",
+    browser,
+    physicalSettlement: browser.then(() => undefined),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: () => { cancelled += 1; finish("cancelled"); },
+  }));
+  const server = startServer(config, {
+    astraJev: createAstraJevService({
+      settingsStore: new AstraJevSettingsStore(join(directory, "settings")),
+      historyStore: new HistoryStore({ directory: join(directory, "history") }),
+    }),
+  });
+  try {
+    // Invoke this server's installed signal handler, not every server fixture's
+    // handler and never a signal to the test runner or the user's daemon.
+    const shutdown = process.listeners("SIGTERM").find(listener => !previousTerm.has(listener));
+    expect(shutdown).toBeDefined();
+    shutdown!("SIGTERM");
+    expect(cancelled).toBe(0);
+    expect(chatGptTurnSessions.activeCount()).toBe(0);
+    finish("the existing webpage finished after its observer detached");
+    expect(await session.browserOutcome).toEqual({
+      type: "final", answer: "the existing webpage finished after its observer detached",
+    });
+    await Bun.sleep(25);
+  } finally {
+    finish("fixture cleanup");
+    chatGptTurnSessions.clear();
+    for (const listener of process.listeners("SIGTERM")) if (!previousTerm.has(listener)) process.off("SIGTERM", listener);
+    for (const listener of process.listeners("SIGINT")) if (!previousInt.has(listener)) process.off("SIGINT", listener);
+    await server.stop(true);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("authenticated shutdown requires a verified idle drain", async () => {
   const config = { ...defaultConfig("browser-only"), port: 0 };
   const testDirectory = mkdtempSync(join(tmpdir(), "codex-web-server-shutdown-"));

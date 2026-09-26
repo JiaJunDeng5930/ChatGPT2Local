@@ -1166,7 +1166,9 @@ export function startServer(
   function shutdown(): void {
     if (shutdownPromise) return;
     draining = true;
-    chatGptTurnSessions.clear();
+    // Stopping the local observer is not permission to stop a paid web answer.
+    // Only the authenticated cancellation handlers above may call clear().
+    chatGptTurnSessions.detachAll();
     flushResponseState();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([
