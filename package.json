@@ -5,11 +5,11 @@
   "description": "A checked Bend application for retained ChatGPT webpages and native Codex tools",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/miuuyy/codex-chatgpt-web.git"
+    "url": "git+https://github.com/JiaJunDeng5930/ChatGPT2Local.git"
   },
-  "homepage": "https://github.com/miuuyy/codex-chatgpt-web#readme",
+  "homepage": "https://github.com/JiaJunDeng5930/ChatGPT2Local#readme",
   "bugs": {
-    "url": "https://github.com/miuuyy/codex-chatgpt-web/issues"
+    "url": "https://github.com/JiaJunDeng5930/ChatGPT2Local/issues"
   },
   "packageManager": "bun@1.4.0",
   "type": "module",

@@ -2,7 +2,9 @@
 
 A local Codex Responses provider backed by a user-authenticated ChatGPT webpage. Version 6 is a redesign: the operation, tool, history, observation, and adaptive-routing decisions execute from checked Bend source. TypeScript handles browser, SQLite, HTTP, filesystem, and process boundaries. The desktop is a small Electron window host; it does not contain a second task state machine.
 
-[中文](README.zh-CN.md) · [Design and proof scope](docs/rewrite.md) · [Verification](docs/verification.md)
+[中文](README.zh-CN.md) · [Design and proof scope](docs/rewrite.md) · [Verification](docs/verification.md) · [Upstream relationship](UPSTREAM.md)
+
+This repository is an independent Bend-based rewrite descended from [`miuuyy/codex-chatgpt-web`](https://github.com/miuuyy/codex-chatgpt-web). It does not merge or rebase the original repository. Relevant upstream protocol, ChatGPT DOM, model-capability, security, and observable bug fixes are reviewed and reimplemented against this architecture; see [`UPSTREAM.md`](UPSTREAM.md).
 
 ## Run from source
 

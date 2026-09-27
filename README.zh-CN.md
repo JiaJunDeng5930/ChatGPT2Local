@@ -2,6 +2,8 @@
 
 这是把已登录的 ChatGPT 网页作为 Codex 模型后端的本地软件。6.0 是重新设计和实现，不是旧代码外面包一层 Bend：任务状态、工具调用、历史复用、完成判断和可选的推理等级路由使用经过检查的 Bend 实现；TypeScript 负责浏览器、数据库、网络和进程接口。旧 `src/`、`launcher/`、`tests/`、`scripts/` 已删除。
 
+本仓库是从 [`miuuyy/codex-chatgpt-web`](https://github.com/miuuyy/codex-chatgpt-web) 演化出的独立 Bend 重写。后续不会把原仓库的 `main` 合并或 rebase 到本项目；与 ChatGPT DOM、协议、模型能力、安全和可观察行为相关的上游变化会经过审查后按当前架构重新实现。具体约定见 [`UPSTREAM.md`](UPSTREAM.md)。
+
 ## 启动
 
 准备 Bun **1.4.0**、Python 3、Node 和 C 编译器，在 macOS 或 Linux 执行：
