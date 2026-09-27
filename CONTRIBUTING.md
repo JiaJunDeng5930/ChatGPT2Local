@@ -1,73 +1,11 @@
-# Contributing
+# Development
 
-Codex Web GPT was created and is primarily developed and maintained by
-[@miuuyy](https://github.com/miuuyy). Product direction, core architecture, and release decisions
-remain with the creator. Other contributors listed by GitHub have provided focused external fixes
-rather than shared product or architectural ownership.
+Install the pinned dependencies and compiler using README.md. Use an isolated `--home` or `bun run dev:app`; never exercise test mutations against a logged-in personal profile.
 
-External contributions are welcome, but this is an intentionally maintainer-led project. Pull
-requests are expected to be small, focused, and easy to review and verify. Good contributions
-include isolated bug fixes, regression tests, documentation corrections, and narrow
-platform-specific fixes.
+Business decisions belong in `bend/`. Changes to those decisions need a stated meaning, an independent specification or clearly bounded safety theorem, actual production bindings, and a checked proof. Do not recreate the state machine in TypeScript, count a hand-written simulator as execution evidence, or treat an old verification manifest as permission to skip the checker.
 
-Before opening a bug report, work through [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and use the
-structured issue form. Reproduce once on the latest release and attach the privacy-safe export from
-**Activity → Export safe log**; never upload raw browser state, credentials, or unredacted logs.
+The `runtime/` directory interprets committed effects and validates external values. Encode and bound the whole decision before committing. Claim external effects before performing them. After a claimed effect loses its receipt, preserve uncertainty; never replay it. Keep per-operation physical effect ordering even when JavaScript promises interleave.
 
-Large feature branches, broad refactors, rewrites, new providers, and changes to core behavior or
-architecture are generally not accepted. In rare cases they may be considered, but discuss the
-proposal in [Ideas](https://github.com/miuuyy/codex-chatgpt-web/discussions/categories/ideas) before
-implementation. Feature requests belong there; issues track bugs. Prior discussion does not
-guarantee acceptance, and a large unsolicited pull request may be closed even when substantial
-work went into it.
+Run `bun run verify` for the fresh gate. New mutations must type-check the mutated production entry and fail the actual proof for a semantic mismatch, not a syntax error. Browser regressions belong in the isolated Electron fixture suite. Tests must not send real-account messages, run model subagents, overwrite a user profile, or silently skip the real UI boundary.
 
-## Scope and invariants
-
-- Keep the project focused on ChatGPT web-backed Codex models. Generic providers and unrelated
-  product surfaces are out of scope.
-- Model selection is explicit. Never silently fall back to another model or reasoning level.
-- Full mode exposes local tools only through the active outer Codex registry and official MCP
-  tunnel. Browser-only mode must not create a broker capability or attach an MCP connector.
-- Every available ChatGPT Web effort has the same turn-bound MCP capability in Full mode. Do not
-  add effort-specific MCP exclusions.
-- Preserve fail-closed behavior. A selector or protocol failure must never pick another option
-  or claim success. An uncertain webpage observation is not cancellation or retry authority:
-  retain the page and operation evidence rather than stopping, reloading or resending.
-- Never commit browser state, cookies, API keys, tunnel IDs, Codex history, generated logs, or
-  absolute user paths.
-
-## Before opening a pull request
-
-1. Run `bun install --frozen-lockfile` in the repository root and in `launcher/`.
-2. Run `bun run verify`.
-3. Add a focused regression test for behavior changes.
-4. For browser UI changes, include the observed DOM evidence and a reproducible fixture. Do not
-   broaden selectors speculatively.
-5. Keep Terms and trademark claims factual. Do not market the project as a quota or rate-limit
-   bypass.
-6. Manually test the affected behavior. DEV mode is sufficient only when the change does not affect
-   local-tool execution, MCP execution, or the outer Codex agent loop. Execution changes require a
-   real installed Codex integration; DEV simulation is not end-to-end acceptance evidence.
-
-Launcher changes must preserve native packaging on macOS, Windows, and Linux. Platform packages
-must be built on their matching operating system. See [DEV chat mode](docs/dev-chat.md) for isolated
-browser and MCP development, and [release validation](docs/release-validation.md) for the required
-account-bound release checks.
-
-## Bend runtime changes
-
-Read [Verified browser execution](docs/verified-runtime.md) before changing execution,
-history, tool obligations or page ownership. Change the independent specification,
-implementation and real proof binding together. Keep those policies in Bend; host
-adapters should interpret decisions rather than create alternative lifecycles.
-
-After editing pure sources, run `bun run bend:build` and commit the regenerated
-`src/verified/generated/core.cjs`. `bun run verify` rejects a stale artifact and
-runs actual pure/native verification, proof-gate probes and semantic mutants before
-packaging. A passing TypeScript suite alone is not evidence that the current Bend
-sources generated the current runtime.
-
-Use regression tests for concrete foreign boundaries: a lost send response, partial
-receipt, conflicting page witness, serializer failure or real process protocol.
-Do not label a syntax error as a killed semantic mutant, an imported build receipt
-as a proof of host code, or local fixtures as live account-bound acceptance.
+Use `bun run app:package:dir` to inspect a platform package. A release needs the exact build manifest, fresh verification evidence, platform smoke evidence, and any claimed signing/notarization evidence. Do not describe a configured target as a tested target.

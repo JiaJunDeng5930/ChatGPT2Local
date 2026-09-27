@@ -1,20 +1,13 @@
-# Security policy
+# Security boundaries
 
-Do not open public issues containing ChatGPT cookies, browser storage, tunnel IDs, API keys,
-Codex prompts, tool results, or local filesystem paths. Redact diagnostic bundles before sharing.
+The application is a local, single-user bridge. Its state directory contains task text, tool results, turn capabilities, configuration, and browser login data. Keep it private and do not attach its database or profile to public issues. Diagnostics intentionally omit task content and capabilities.
 
-The daemon binds only to loopback. If another local user can access your account or application
-home, treat the browser session and tunnel key as compromised and rotate them.
+The control and Responses API binds to literal loopback addresses and requires a local bearer token. The browser-control host has a separate capability. The MCP transport uses persistent session identities; every operation-bearing tool call additionally requires the active turn capability. A tunnel must expose the stdio MCP adapter, not the dashboard or the entire local API.
 
-Read the complete [security model](docs/security-model.md) before enabling full mode. In particular,
-full mode lets an untrusted model response request tools from the current Codex turn; keep connector
-action control, Codex sandboxing, and approvals aligned with the workspace's risk.
+The embedded webpage has no Node integration or preload bridge. The desktop shell's limited IPC is available only to the trusted shell main frame. Browser permissions are denied by default. Chromium's local debugging interface is powerful: other processes under the same OS user can potentially inspect it. This is not an isolation boundary against a compromised local account.
 
-The stable MCP v1 SDK currently declares the vulnerable `@hono/node-server` 1.x range even though
-this project uses only its stdio transport. The lockfile explicitly resolves that unused HTTP
-adapter to patched 2.0.12. `bun audit`, the MCP protocol test, and the compiled-binary smoke test are
-release gates; remove the override when the stable SDK itself moves to the patched major.
+Native tools are delegated to the outer Codex runtime with its existing approval and sandbox policy. The optional native upstream forwards only an explicit credential. A missing named environment variable must not fall back to another account. A shared Codex credential is not sent to an arbitrary third-party host. Optional adaptive advice discloses request context to the configured advisor, which must be acceptable to the user.
 
-Once the GitHub repository is public, use its private Security Advisory reporting flow. Until that
-is enabled, do not publish a proof of concept that exposes credentials or arbitrary local tool
-execution; contact the maintainer privately through the GitHub account listed by the repository.
+The durable send claim provides at-most-once activation by this interpreter under the stated database and browser assumptions. It does not prove remote exactly-once execution, prevent an external browser extension from submitting, or make DOM observations infallible. Webpage uncertainty never authorizes automatic interruption, retry, regeneration, replacement-page submission, or quota-consuming fallback.
+
+Report suspected capability leakage or execution-authority bugs privately to the repository maintainers. A useful report includes a minimal local reproduction, versions, and sanitized event categories—not cookies, bearer tokens, task contents, or private native tool outputs.

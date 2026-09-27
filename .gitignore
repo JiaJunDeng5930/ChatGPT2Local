@@ -9,14 +9,13 @@ coverage/
 *.sock
 *.key
 storage-state.json
-runtime/
-.launcher-runtime/
-launcher/build/
-launcher/release/
-launcher/artifacts/
+.build/
+.state/
 .playwright-cli/
 output/
 notes.md
 .cache/
 
 __pycache__/
+desktop/node_modules/
+desktop/release/

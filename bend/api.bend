@@ -1,4 +1,6 @@
 import Base
+import ./application.bend as Application
+import ./application-domain.bend as AD
 import ./domain.bend as D
 import ./kernel.bend as K
 import ./history.bend as H
@@ -20,6 +22,32 @@ import ./replay.bend as Replay
 import ./replay-domain.bend as RP
 import ./lease.bend as Lease
 import ./lease-domain.bend as LD
+import ./routing.bend as Routing
+import ./routing-domain.bend as RD
+
+def routing_step(state: RD.Phase, event: RD.Event) -> RD.Decision:
+  Routing.step(state, event)
+
+def routing_effort(text: String) -> Maybe<&2, RD.Effort>:
+  RD.decode(text)
+
+def routing_name(effort: RD.Effort) -> String:
+  RD.name(effort)
+
+def routing_choose(cache: RD.Cache, environment: String, history: List<&2, String>) -> RD.Choice:
+  Routing.choose(cache, environment, history)
+
+def routing_install(environment: String, history: List<&2, String>, effort: RD.Effort, +steps: Nat) -> RD.Cache:
+  RD.install(RD.valid_lease(steps), environment, history, effort, steps)
+
+def app_initialize(full: Bool, tools: List<&2, String>, environment: String) -> AD.State:
+  Application.initialize(full, tools, environment)
+
+def app_step(state: AD.State, input: AD.Input) -> AD.Decision:
+  Application.step(state, input)
+
+def app_authorized(state: AD.State, effect: AD.Effect) -> Bool:
+  AD.authorized(state, effect)
 
 def turn_step(s: D.Phase, e: D.Event) -> D.Decision:
   K.step(s, e)
@@ -130,7 +158,10 @@ type Exports is Data:
           broker: BR.Decision, broker_trace: List<&2, BR.Decision>,
           progress: PD.Decision, progress_trace: List<&2, PD.Decision>, valid_progress: Bool,
           outbox: OB.Decision, contains: Bool, outbox_trace: List<&2, OB.Decision>,
-          replay: RP.Decision, closed_replay: Bool, terminal_replay: Bool, replay_trace: List<&2, RP.Decision>}
+          replay: RP.Decision, closed_replay: Bool, terminal_replay: Bool, replay_trace: List<&2, RP.Decision>,
+          application: AD.Decision, authorization: Bool,
+          routing: RD.Decision, route_effort: Maybe<&2, RD.Effort>, route_name: String,
+          route_choice: RD.Choice, route_cache: RD.Cache}
 
 def main() -> Exports:
   Exports{
@@ -157,5 +188,9 @@ def main() -> Exports:
     outbox_run(Con{OB.Receipt{"example"}, Nil{}}, outbox_initialize()),
     replay_step(replay_initialize(), RP.Seal{}),
     replay_closed(replay_initialize()), replay_terminal(replay_initialize()),
-    replay_run(Con{RP.Seal{}, Nil{}}, replay_initialize())
+    replay_run(Con{RP.Seal{}, Nil{}}, replay_initialize()),
+    app_step(app_initialize(False{}, Nil{}, "environment"), AD.Detached{}),
+    app_authorized(app_initialize(False{}, Nil{}, "environment"), AD.Passive{}),
+    routing_step(RD.Unchosen{}, RD.Begin{None{}}), routing_effort("medium"), routing_name(RD.Medium{}),
+    routing_choose(RD.Empty{}, "environment", Nil{}), routing_install("environment", Nil{}, RD.Medium{}, 2n)
   }

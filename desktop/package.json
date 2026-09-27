@@ -1,0 +1,23 @@
+{
+  "name": "codex-web-bend-desktop",
+  "version": "6.0.0",
+  "private": true,
+  "main": "main.cjs",
+  "description": "A desktop browser host for the checked Bend Codex Web application",
+  "author": "miuuyy",
+  "scripts": { "start": "electron .", "package": "electron-builder", "package:dir": "electron-builder --dir" },
+  "devDependencies": { "electron": "41.10.7", "electron-builder": "26.8.1" },
+  "trustedDependencies": ["electron"],
+  "build": {
+    "appId": "dev.codexwebgpt.desktop",
+    "productName": "Codex Web GPT",
+    "artifactName": "codex-web-gpt-${version}-${os}-${arch}.${ext}",
+    "directories": { "output": "release" },
+    "files": ["*.cjs", "*.js", "*.css", "*.html", "package.json", "assets/**"],
+    "extraResources": [{ "from": "../dist/runtime", "to": "runtime" }],
+    "mac": { "category": "public.app-category.developer-tools", "target": ["dmg", "zip"], "hardenedRuntime": true, "icon": "assets/icon.png" },
+    "win": { "target": ["nsis"], "icon": "assets/icon.ico" },
+    "linux": { "category": "Development", "target": ["AppImage"], "icon": "assets/icon.png" },
+    "nsis": { "oneClick": false, "perMachine": false, "allowElevation": false }
+  }
+}

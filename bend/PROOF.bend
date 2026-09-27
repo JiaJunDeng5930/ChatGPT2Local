@@ -13,3 +13,5 @@ import ./replay-proof.bend as Replay
 import ./lease-proof.bend as Lease
 import ./api.bend as API
 import ./native-protocol.bend as Protocol
+import ./application-proof.bend as Application
+import ./routing-proof.bend as Routing

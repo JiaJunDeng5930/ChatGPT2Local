@@ -1,8 +1,8 @@
 {
   "name": "codex-chatgpt-web",
-  "version": "5.0.8",
+  "version": "6.0.0",
   "private": true,
-  "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT web session.",
+  "description": "A checked Bend application for retained ChatGPT webpages and native Codex tools",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/miuuyy/codex-chatgpt-web.git"
@@ -14,7 +14,7 @@
   "packageManager": "bun@1.4.0",
   "type": "module",
   "bin": {
-    "codex-chatgpt-web": "./src/cli.ts"
+    "codex-chatgpt-web": "./runtime/cli.ts"
   },
   "files": [
     "dist",
@@ -23,51 +23,36 @@
     "LICENSES"
   ],
   "scripts": {
-    "start": "bun run src/cli.ts serve",
-    "setup": "bun run src/cli.ts setup",
-    "doctor": "bun run src/cli.ts doctor",
-    "dev:launcher": "bun run src/cli.ts dev launcher",
-    "dev:chat": "bun run src/cli.ts dev chat",
-    "test": "bun test ./tests",
-    "audit": "bun audit",
-    "check-version": "bun run scripts/check-version.ts",
-    "typecheck": "bun x --no-install --bun tsc --noEmit",
-    "bend:setup": "python3 scripts/setup-bend.py",
-    "bend:build": "python3 scripts/build-bend-core.py --native",
-    "bend:check": "bun run scripts/verify-bend-build.ts",
-    "bend:verify": "bun run scripts/verify-bend-build.ts --full",
-    "licenses": "bun run scripts/generate-third-party-notices.ts --include-launcher",
-    "clean": "bun run scripts/clean.ts",
-    "build": "bun run scripts/build-runtime-bundle.ts",
-    "smoke": "bun run scripts/smoke-release.ts dist/runtime",
-    "smoke:codex": "bun run scripts/smoke-codex-catalog.ts",
-    "smoke:cancel": "bun run scripts/smoke-codex-cancel.ts",
-    "smoke:interrupt": "bun run scripts/smoke-codex-interrupt.ts",
-    "smoke:subagents": "bun run scripts/smoke-codex-subagents.ts --v1 && bun run scripts/smoke-codex-subagents.ts --v2",
-    "smoke:subagents:live": "bun run scripts/smoke-codex-web-subagents.ts",
-    "smoke:environment": "bun run scripts/smoke-codex-environment.ts",
-    "launcher": "bun run scripts/start-launcher.ts",
-    "app": "bun run scripts/start-launcher.ts",
-    "app:package": "bun run --cwd launcher package",
-    "app:smoke": "bun run --cwd launcher smoke:package",
-    "launcher:dev": "bun run --cwd launcher dev",
-    "launcher:audit": "bun run --cwd launcher audit",
-    "launcher:typecheck": "bun run --cwd launcher typecheck",
-    "launcher:build": "bun run --cwd launcher build",
-    "launcher:test": "bun run --cwd launcher test",
-    "verify": "bun run scripts/verify.ts"
+    "start": "bun runtime/cli.ts serve",
+    "setup": "bun runtime/cli.ts setup",
+    "doctor": "bun runtime/cli.ts doctor",
+    "migrate": "bun runtime/cli.ts migrate",
+    "install-models": "bun runtime/cli.ts install-models",
+    "app": "bun runtime/cli.ts desktop",
+    "dev:app": "bun runtime/cli.ts dev desktop",
+    "dev:chat": "bun runtime/cli.ts dev chat",
+    "dev:serve": "bun runtime/cli.ts dev serve",
+    "test": "bun test ./test",
+    "typecheck": "tsc --noEmit",
+    "bend:setup": "python3 tools/bootstrap.py",
+    "bend:build": "python3 tools/build.py --native",
+    "bend:check": "python3 tools/build.py --check",
+    "bend:verify": "python3 tools/proof_tests.py",
+    "build": "bun tools/package.ts",
+    "smoke": "bun tools/smoke.ts dist/runtime",
+    "app:package": "bun run build && bun run --cwd desktop package",
+    "app:package:dir": "bun run build && bun run --cwd desktop package:dir",
+    "app:smoke": "bun tools/desktop-smoke.ts",
+    "verify": "bun tools/verify.ts",
+    "audit": "bun audit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
-    "chromium-bidi": "12.1.0",
-    "fflate": "^0.8.2",
-    "playwright-core": "^1.62.0",
+    "playwright-core": "1.62.0",
     "tiktoken": "1.0.22",
     "turndown": "7.2.0",
-    "turndown-plugin-gfm": "1.0.2",
-    "zod": "4.4.3"
+    "turndown-plugin-gfm": "1.0.2"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",
@@ -78,11 +63,7 @@
     "bun": "1.4.0"
   },
   "overrides": {
-    "@hono/node-server": "2.0.12",
-    "fast-uri": "3.1.6",
-    "hono": "4.13.5",
-    "qs": "6.16.0",
-    "zod-to-json-schema": "3.25.1"
+    "fast-uri": "3.1.6"
   },
   "keywords": [
     "codex",
