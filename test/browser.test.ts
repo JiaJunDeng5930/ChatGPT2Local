@@ -7,7 +7,7 @@ import { defaultConfig, writeConfig } from "../runtime/config";
 import { WebBrowser } from "../runtime/browser";
 import { Store } from "../runtime/store";
 import { parseRequest } from "../runtime/protocol";
-import { eventually, requestBody } from "./fixtures";
+import { eventually, requestBody, requestHeaders, continuationBody } from "./fixtures";
 import { browserFixture } from "./browser-fixture";
 import { randomBytes } from "node:crypto";
 
@@ -62,7 +62,7 @@ describe("real Electron DOM, input, identity, and at-most-once activation", () =
     const service = JSON.parse(readFileSync(join(home, "service.json"), "utf8"));
     const response = await fetch(`http://127.0.0.1:${service.port}/health`);
     expect(response.ok).toBe(true);
-    expect((await response.json() as any).version).toBe("6.0.0");
+    expect((await response.json() as any).version).toBe("7.0.0");
     const windows = electron.windows();
     const shell = windows.find(page => page.url().endsWith("shell.html"));
     expect(shell).toBeTruthy();
@@ -75,8 +75,8 @@ describe("real Electron DOM, input, identity, and at-most-once activation", () =
 
   test("prepared text survives the real editor and one click is never activated twice", async () => {
     const browser = new WebBrowser({ endpoint, startUrl: origin, hostUrl, hostToken }, 4000);
-    const context = parseRequest(requestBody("dom-one"), new Headers(), "browser-only", store).context;
-    const prepared = await browser.prepare("dom-one", 0, "Exact multiline\nsecond line 😀", context, { offset: 0 });
+    const context = parseRequest(requestBody("dom-one"), new Headers({ "idempotency-key": "dom-fixture" }), "browser-only", store).context;
+    const prepared = await browser.prepare("dom-one", 0, "Exact multiline\nsecond line 😀", context, {});
     expect((await browser.send("dom-one", 0)).clicked).toBe(true);
     await expect(browser.send("dom-one", 0)).rejects.toThrow("consumed send");
     const pages = connection.contexts().flatMap(c => c.pages());
@@ -90,10 +90,10 @@ describe("real Electron DOM, input, identity, and at-most-once activation", () =
     expect(await page.evaluate(() => (window as any).fixture.stops)).toBe(0);
   });
 
-  test("selects the exact native connector before typing without erasing its pill", async () => {
+  test("selects the exact caller-tool connector before typing without erasing its pill", async () => {
     const browser = new WebBrowser({ endpoint, startUrl: origin, hostUrl, hostToken }, 4000);
-    const context = parseRequest(requestBody("dom-full", undefined, true), new Headers(), "full", store).context;
-    await browser.prepare("dom-full", 0, "Use the actual native tools", context, { offset: 0 });
+    const context = parseRequest(requestBody("dom-full", undefined, true), new Headers({ "idempotency-key": "dom-fixture" }), "full", store).context;
+    await browser.prepare("dom-full", 0, "Use the actual native tools", context, {});
     await browser.send("dom-full", 0);
     const snapshot = await browser.snapshot("dom-full");
     expect(snapshot.accepted).toBe(true);
@@ -101,8 +101,8 @@ describe("real Electron DOM, input, identity, and at-most-once activation", () =
 
   test("a document navigation invalidates reattachment instead of reconstructing a task", async () => {
     const browser = new WebBrowser({ endpoint, startUrl: origin, hostUrl, hostToken }, 4000);
-    const context = parseRequest(requestBody("dom-lost"), new Headers(), "browser-only", store).context;
-    const prepared = await browser.prepare("dom-lost", 0, "Do not resend", context, { offset: 0 });
+    const context = parseRequest(requestBody("dom-lost"), new Headers({ "idempotency-key": "dom-fixture" }), "browser-only", store).context;
+    const prepared = await browser.prepare("dom-lost", 0, "Do not resend", context, {});
     await browser.send("dom-lost", 0);
     const page = connection.contexts().flatMap(c => c.pages()).filter(page => page.url().startsWith(origin)).at(-1)!;
     await page.goto(origin); // External/user navigation, not an application action.
@@ -112,8 +112,8 @@ describe("real Electron DOM, input, identity, and at-most-once activation", () =
 
   test("a manual new turn cannot be mistaken for the owned answer or cancelled", async () => {
     const browser = new WebBrowser({ endpoint, startUrl: origin, hostUrl, hostToken }, 4000);
-    const context = parseRequest(requestBody("manual-fork"), new Headers(), "browser-only", store).context;
-    await browser.prepare("manual-fork", 0, "Owned task", context, { offset: 0 });
+    const context = parseRequest(requestBody("manual-fork"), new Headers({ "idempotency-key": "dom-fixture" }), "browser-only", store).context;
+    await browser.prepare("manual-fork", 0, "Owned task", context, {});
     await browser.send("manual-fork", 0);
     const page = connection.contexts().flatMap(c => c.pages()).filter(p => p.url().startsWith(origin)).at(-1)!;
     await page.evaluate(() => {
@@ -128,24 +128,24 @@ describe("real Electron DOM, input, identity, and at-most-once activation", () =
 
   test("a free Think control supports medium without substituting a paid effort", async () => {
     const browser = new WebBrowser({ endpoint, startUrl: origin + "/free", hostUrl, hostToken }, 4000);
-    const context = parseRequest(requestBody("free-think"), new Headers(), "browser-only", store).context;
-    await browser.prepare("free-think", 0, "Free account task", context, { offset: 0 });
+    const context = parseRequest(requestBody("free-think"), new Headers({ "idempotency-key": "dom-fixture" }), "browser-only", store).context;
+    await browser.prepare("free-think", 0, "Free account task", context, {});
     await browser.send("free-think", 0);
     expect((await browser.snapshot("free-think")).accepted).toBe(true);
     await browser.cancel("free-think");
     await browser.cancel("free-think");
     const page = connection.contexts().flatMap(c => c.pages()).filter(p => p.url().endsWith("/free")).at(-1)!;
     expect(await page.evaluate(() => (window as any).fixture.stops)).toBe(1);
-    await expect(browser.prepare("paid-unavailable", 0, "Must not send", { ...context, effort: "pro" }, { offset: 0 })).rejects.toThrow("cannot verify");
+    await expect(browser.prepare("paid-unavailable", 0, "Must not send", { ...context, effort: "pro" }, {})).rejects.toThrow("cannot verify");
   });
 
-  test("the desktop HTTP service completes and reuses actual retained webpage history", async () => {
+  test("the desktop HTTP service continues the explicit predecessor on its retained page", async () => {
     const service = JSON.parse(readFileSync(join(home, "service.json"), "utf8"));
     const config = JSON.parse(readFileSync(join(home, "application.json"), "utf8"));
-    const send = (body: unknown) => fetch(`http://127.0.0.1:${service.port}/v1/responses`, {
-      method: "POST", headers: { authorization: `Bearer ${config.token}`, "content-type": "application/json" }, body: JSON.stringify(body),
+    const send = (body: import("../runtime/contracts").ObjectValue) => fetch(`http://127.0.0.1:${service.port}/v1/responses`, {
+      method: "POST", headers: { authorization: `Bearer ${config.token}`, "content-type": "application/json", ...Object.fromEntries(requestHeaders(body)) }, body: JSON.stringify(body),
     });
-    const body: import("../runtime/contracts").ObjectValue = { ...requestBody("real-http-one"), stream: false };
+    const body = requestBody("real-http-one"); body.stream = false;
     const first = send(body);
     void first.catch(() => {});
     let owned: import("playwright-core").Page | undefined;
@@ -153,7 +153,7 @@ describe("real Electron DOM, input, identity, and at-most-once activation", () =
     while (!owned && Date.now() < deadline) {
       for (const candidate of connection.contexts().flatMap(c => c.pages()).filter(p => p.url() === origin + "/")) {
         const marker = await candidate.evaluate(() => (globalThis as any).__bend_web_ownership_v1__);
-        if (marker?.operation.startsWith("native:") && marker.activated) { owned = candidate; break; }
+        if (marker?.operation.startsWith("web:") && marker.activated) { owned = candidate; break; }
       }
       if (!owned) await Bun.sleep(30);
     }
@@ -173,8 +173,7 @@ describe("real Electron DOM, input, identity, and at-most-once activation", () =
     expect(firstResponse.status).toBe(200);
     const result = await firstResponse.json() as any;
     expect(result.output[0].content[0].text).toBe("First owned answer");
-    const nextInput = [...body.input as unknown[], ...result.output, { type: "message", role: "user", content: [{ type: "input_text", text: "Only the next turn" }] }];
-    const second = send({ ...requestBody("real-http-two", nextInput), stream: false });
+    const second = send(continuationBody(result.id, "Only the next turn"));
     void second.catch(() => {});
     await owned!.waitForFunction(() => (window as any).fixture.sends === 2, undefined, { timeout: 10000 });
     const next = await owned!.evaluate(() => (globalThis as any).__bend_web_ownership_v1__);
@@ -182,7 +181,7 @@ describe("real Electron DOM, input, identity, and at-most-once activation", () =
     expect(next.payload).toContain("Only the next turn");
     expect(next.payload).not.toContain("Return a result.");
     expect(next.payload).not.toContain("First owned answer");
-    expect(next.payload).toContain('"kind":"confirmed_suffix"');
+    expect(next.payload).toContain("Continue this exact conversation");
     await owned!.evaluate(() => (window as any).fixture.finish("Second owned answer"));
     expect((await (await second).json() as any).output[0].content[0].text).toBe("Second owned answer");
     const shell = electron.windows().find(page => page.url().endsWith("shell.html"))!;

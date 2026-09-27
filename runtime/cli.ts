@@ -10,7 +10,6 @@ import { compiled } from "./kernel";
 import { startServer } from "./server";
 import { OwnerLock } from "./owner";
 import { Store } from "./store";
-import { installProfile } from "./integration";
 import { stdio } from "./stdio";
 
 function options(argv: string[]): { args: string[]; flags: Map<string, string | true> } {
@@ -21,7 +20,7 @@ function options(argv: string[]): { args: string[]; flags: Map<string, string | 
     if (!value.startsWith("--")) { args.push(value); continue; }
     const name = value.slice(2);
     if (booleans.has(name)) flags.set(name, true);
-    else if (["home", "port", "cdp", "host-url", "codex-home", "key-file", "tunnel-id", "tunnel-binary", "connector-name"].includes(name)) {
+    else if (["home", "port", "cdp", "host-url", "key-file", "tunnel-id", "tunnel-binary", "connector-name"].includes(name)) {
       const next = argv[++i];
       if (!next || next.startsWith("--")) throw new Error(`--${name} requires a value`);
       flags.set(name, next);
@@ -35,7 +34,6 @@ setup                     Create application.json, preserving legacy journals
 serve                     Run the Bend application and loopback HTTP/MCP service
 doctor                    Inspect configuration, service, and browser (no sends)
 status                    Read durable operation status from the active runtime
-install-models            Add an isolated Codex --profile web configuration
 migrate [OLD-ID NEW-ID]    Check/migrate storage; optionally map a legacy identity
 resume ID [--confirm]      Observe the original page; never resend or reload it
 cancel ID                 Explicitly request Stop on the original page
@@ -48,8 +46,7 @@ chat                      Interactive browser-only client using this service
 
 --home PATH selects all application storage. --port overrides the listener.
 --cdp URL selects an already running Chromium/Electron loopback debug endpoint.
---codex-home PATH selects where install-models writes its isolated profile.
-Web operations require a stable native turn ID or an Idempotency-Key.
+Each request requires an Idempotency-Key; continuations name previous_response_id.
 Configuration and account-dependent UI are never repaired by resubmitting tasks.`;
 
 async function control(config: Config, route: string, body?: Record<string, unknown>): Promise<unknown> {
@@ -75,11 +72,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (!existsSync(join(home, "application.json"))) {
       const initial = readConfig(home, true);
       initial.port = 18787; initial.browser.endpoint = "http://127.0.0.1:19222";
-      initial.browser.connectorName = "Codex Native2 DEV";
+      initial.browser.connectorName = "ChatGPT Web Tools DEV";
       writeConfig(home, initial);
     }
   }
-  const config = readConfig(home, command === "setup" || command === "desktop");
+  const migrationLock = command === "migrate" ? new OwnerLock(home) : undefined;
+  let config: Config;
+  try { config = readConfig(home, command === "setup" || command === "desktop", command === "migrate"); }
+  catch (error) { migrationLock?.close(); throw error; }
   if (flags.has("port")) config.port = Number(flags.get("port"));
   if (flags.has("cdp")) config.browser.endpoint = String(flags.get("cdp"));
   if (flags.has("host-url")) {
@@ -91,14 +91,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     writeConfig(home, JSON.parse(await Bun.stdin.text()));
     console.log("Configuration saved. Active operations retain their frozen environment until the next explicit restart."); return;
   }
-  if (command === "install-models") { console.log(installProfile(home, config, flags.has("codex-home") ? String(flags.get("codex-home")) : undefined)); return; }
   if (command === "status") { console.log(JSON.stringify(await control(config, "status"), null, 2)); return; }
   if (command === "resume" || command === "cancel") {
     if (!args[0]) throw new Error("A durable operation ID is required");
     console.log(JSON.stringify(await control(config, command, { id: args[0], ...(flags.has("confirm") ? { confirm: true } : {}) }))); return;
   }
   if (command === "migrate") {
-    const lock = new OwnerLock(home);
+    const lock = migrationLock!;
     try {
       const store = new Store(home, { migrate: true });
       try {
@@ -155,22 +154,20 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     process.exitCode = await new Promise<number>((resolveExit, reject) => { child.once("error", reject); child.once("exit", code => resolveExit(code ?? 1)); }); return;
   }
   if (command === "chat") {
-    if (config.mode !== "browser-only") throw new Error("The standalone chat client has no outer Codex tool executor. Use browser-only mode or run Codex --profile web");
-    const input: unknown[] = [];
+    let previous: string | undefined;
     const consoleInput = createInterface({ input: process.stdin, output: process.stdout });
     try {
       for (;;) {
         const text = await consoleInput.question("You> ");
         if (text === "/quit") break;
         if (!text.trim()) continue;
-        input.push({ type: "message", role: "user", content: [{ type: "input_text", text }] });
-        const request = { model: `chatgpt-web/${config.efforts[0]}`, input, stream: false };
+        const request = { ...(previous ? { previous_response_id: previous } : { model: `chatgpt-web/${config.efforts[0]}` }), input: text, stream: false };
         const response = await fetch(`http://127.0.0.1:${config.port}/v1/responses`, { method: "POST", redirect: "error",
           headers: { "content-type": "application/json", authorization: `Bearer ${config.token}`, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify(request) });
         const body = object(await response.json());
         if (!response.ok) throw new Error(JSON.stringify(body.error));
         const messages = Array.isArray(body.output) ? body.output : [];
-        input.push(...messages);
+        previous = String(body.id);
         console.log(messages.map(raw => { const item = object(raw); return Array.isArray(item.content) ? item.content.map(part => object(part).text ?? "").join("\n") : ""; }).join("\n"));
       }
     } finally { consoleInput.close(); }

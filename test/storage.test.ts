@@ -6,7 +6,6 @@ import { OwnerLock } from "../runtime/owner";
 import { Store } from "../runtime/store";
 import { compiled, encode, decode } from "../runtime/kernel";
 import { defaultConfig, readConfig, writeConfig } from "../runtime/config";
-import { installProfile } from "../runtime/integration";
 import { fixture, eventually, requestBody } from "./fixtures";
 import { digest } from "../runtime/codec";
 
@@ -60,23 +59,28 @@ describe("real process ownership, journal migration, and whole-decision transact
   test("generated boundaries reject forged constructors and preserve large natural counters", () => {
     expect(() => compiled.validate("domain.Phase", { $: "Running", authority: "send" })).toThrow();
     expect(() => compiled.validate("domain.Phase", { $: "Invented" })).toThrow();
-    const state = { $: "Lease", environment: "fixture", history: { $: "Nil" }, effort: { $: "High" }, remaining: 2n ** 80n };
-    expect(decode<typeof state>(encode(state), "routing-domain.Cache")).toEqual(state);
-    expect(() => decode(encode({ ...state, remaining: -1n }), "routing-domain.Cache")).toThrow();
+    const state = { $: "Snapshot", revision: 2n ** 80n, batch: 0n, active: 0n, time: { $: "None" } };
+    expect(decode<typeof state>(encode(state), "progress-domain.Snapshot")).toEqual(state);
+    expect(() => decode(encode({ ...state, revision: -1n }), "progress-domain.Snapshot")).toThrow();
   });
 
-  test("Codex installation preserves unrelated configuration and is repeatable", () => {
-    const home = directory(), codex = directory();
-    const text = 'model = "personal-model"\n[profiles.work]\nmodel = "work-model"\n';
-    writeFileSync(join(codex, "config.toml"), text);
+  test("explicit v7 configuration migration removes obsolete settings and preserves its private backup", () => {
+    const home = directory();
     const config = defaultConfig();
-    installProfile(home, config, codex);
-    const first = readFileSync(join(codex, "config.toml"), "utf8");
-    installProfile(home, config, codex);
-    expect(readFileSync(join(codex, "config.toml"), "utf8")).toBe(first);
-    expect(first).toContain(text.trim());
-    expect((first.match(/\[profiles.web\]/g) ?? []).length).toBe(1);
-    expect(JSON.parse(readFileSync(join(home, "models.json"), "utf8")).models).toHaveLength(5);
+    const old = JSON.stringify({ ...config, native: { baseUrl: "https://old.invalid" },
+      jev: { model: "old-advisor" }, limits: { ...config.limits, maxParts: 6, contextTokens: 90_000 },
+      browser: { ...config.browser, connectorName: "Codex Native2" } });
+    writeFileSync(join(home, "application.json"), old);
+    expect(() => readConfig(home)).toThrow("migrate");
+    const migrated = readConfig(home, false, true);
+    expect(migrated.token).toBe(config.token);
+    expect(migrated.browser.connectorName).toBe("ChatGPT Web Tools");
+    expect("native" in migrated).toBe(false);
+    expect("jev" in migrated).toBe(false);
+    expect(migrated.limits).toEqual(config.limits);
+    expect(readFileSync(join(home, "application.json.before-v7"), "utf8")).toBe(old);
+    expect(readConfig(home, false, true)).toEqual(migrated);
+    expect(readFileSync(join(home, "application.json.before-v7"), "utf8")).toBe(old);
   });
 
   test("configuration migration retains credentials only in the private local file", () => {

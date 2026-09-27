@@ -1,58 +1,70 @@
-# Codex Web · Bend
+# ChatGPT Web
 
-这是把已登录的 ChatGPT 网页作为 Codex 模型后端的本地软件。6.0 是重新设计和实现，不是旧代码外面包一层 Bend：任务状态、工具调用、历史复用、完成判断和可选的推理等级路由使用经过检查的 Bend 实现；TypeScript 负责浏览器、数据库、网络和进程接口。旧 `src/`、`launcher/`、`tests/`、`scripts/` 已删除。
+这个项目在保留的 ChatGPT 网页上运行任务。第 7 版提供独立的 **ChatGPT Web API v1**：调用者用 `previous_response_id` 明确指定继续哪个会话，只发送新增消息，并负责执行自己的工具。服务端保留原网页和请求回执。
 
-本仓库是从 [`miuuyy/codex-chatgpt-web`](https://github.com/miuuyy/codex-chatgpt-web) 演化出的独立 Bend 重写。后续不会把原仓库的 `main` 合并或 rebase 到本项目；与 ChatGPT DOM、协议、模型能力、安全和可观察行为相关的上游变化会经过审查后按当前架构重新实现。具体约定见 [`UPSTREAM.md`](UPSTREAM.md)。
+它不再是 Codex/OpenAI 兼容模型端点，不再根据完整历史或 Codex 元数据猜测对应网页，也不提供原生模型转发和 Astra Jev 路由。
+
+[英文说明](README.md) · [完整协议契约](docs/protocol.md) · [架构](docs/rewrite.md) · [验证范围](docs/verification.md)
 
 ## 启动
 
-准备 Bun **1.4.0**、Python 3、Node 和 C 编译器，在 macOS 或 Linux 执行：
+使用 `package.json` 固定的 Bun 版本：
 
 ```sh
 bun install --frozen-lockfile
 (cd desktop && bun install --frozen-lockfile)
 bun run bend:setup
 bun run bend:build
+bun run setup
 bun run app
 ```
 
-桌面打开后，点击 **Open ChatGPT / sign in**，直接在内嵌浏览器登录。再点击 **Install Codex model profile**，或执行 `bun run install-models`。它只添加单独的配置，不覆盖你的默认模型和其他配置：
+在桌面应用内打开 ChatGPT 并登录。默认 API 地址是 `http://127.0.0.1:8787`，本地授权 token 在所选 `--home` 下的 `application.json` 中。开发时使用 `bun run dev:app`，它使用当前 worktree 的独立配置与浏览器资料。
 
-```sh
-codex --profile web
+## 请求方式
+
+每个逻辑请求必须有独立的 `Idempotency-Key`。同一个请求重试时沿用原 key 和原请求体，可以改变 `stream`；同 key 改内容会被拒绝。
+
+首次请求：
+
+```json
+{"model":"chatgpt-web/medium","input":"解释这个设计。","stream":true}
 ```
 
-默认是 `browser-only`。需要 Codex 原生工具时，将私有配置 `~/.codex-chatgpt-web/application.json` 的 `mode` 改为 `full`，明确重启服务，并在 ChatGPT 连接同名的 **Codex Native2** MCP 连接器。已安装的 `tunnel-client` 可通过以下命令配置、运行；保持隧道进程运行：
+得到最终回答后，保存响应的 `id`，下一次使用新 key，只提交新增内容：
 
-```sh
-bun runtime/cli.ts tunnel-connect --key-file /私有目录/运行密钥 --tunnel-id 隧道ID
-bun runtime/cli.ts tunnel-run
+```json
+{"previous_response_id":"<上一次响应的 id>","input":"再比较一下另一种方案。","stream":true}
 ```
 
-原生工具由外层 Codex 执行，仍然经过 Codex 的审批和沙箱。桥接服务不会直接执行网页给出的 shell 命令。完整配置、CLI-only 用法和可选 Astra Jev 路由见 [英文说明](README.md)。
+续接请求继承首次请求的模型、指令、工具和输出格式，不重新提交这些设置，也不上传旧历史。一个响应只能有一个后继；需要分支、改变设置或换成摘要上下文时，明确创建新的根请求。`bun runtime/cli.ts chat` 是已经按这个协议实现的简单交互客户端。
 
-## 两个最重要的行为
+所有 `/v1/*` 接口都要求 `Authorization: Bearer <本地 token>`。`GET /v1/schema` 返回请求与响应的 JSON Schema。字段、错误码、重试、流式事件及迁移规则以[完整协议](docs/protocol.md)为准。
 
-**检测异常不等于网页失败。** 页面看起来出错、没有新内容、读取失败、HTTP 断开或服务崩溃，都不会自动停止、刷新、重新生成或重发任务。一次发送先在数据库中领取不可重复的权限，再点击按钮；领取后丢失回执只表示未知，不能再领一次。
+## 工具和流式返回
 
-**网页历史就是已经发生的历史，不是每次重放的 API 输入。** 只有原页面、文档身份、完成回答、解释环境和输入前缀都吻合，才会复用页面并追加新内容。用户编辑或分叉历史、手动发送新任务、页面丢失，都不能伪装成原任务的继续。
+使用工具时，在配置中启用 `full` 模式，并通过桌面 MCP 页面连接 **ChatGPT Web Tools**。调用者在首次请求中声明工具名称和参数结构。网页通过 `web_tool_list`、`web_tool_call` 请求调用；API 返回 `requires_action` 后，调用者自行执行工具，再用该响应的 ID 一次性交回完整结果批次。
 
-**Resume observation** 只观察原文档。**Confirm current answer** 是用户明确确认当前回答完成。**Cancel task** 才请求停止，而且不会停止已经被用户另开任务占用的页面。关闭主窗口会隐藏窗口；明确退出会关闭浏览器，尚无结果的任务下次仍保留为未知，不会自动重发。
+工具结果交回原网页正在等待的工具调用，不会再次点击发送。服务端不推断 Codex 内部工具，也不把普通命令翻译成某个特定运行时的工具。
 
-## 迁移和验证
+`stream:true` 返回 SSE。生成中的文本以完整、可替换的临时快照返回，最后返回已提交的响应。调用者应替换临时文本，而不是把每次快照都追加进去。断开连接不代表停止任务，也不会触发重发。
 
-首次初始化会读取旧配置中可明确继承的安装设置，但不会删除旧配置或发送日志。旧日志的任务身份进入新数据库，继续阻止重复发送。无法辨认的日志必须先人工核对、明确映射；不能靠删除记录绕过。
+## 恢复与升级
+
+请求、前驱占用、网页归属和待执行操作在同一事务中登记。最终回答与允许下一次续接的凭据也一起提交。原网页丢失、被手工修改或前驱已被其他请求占用时，接口明确报错，不偷偷新建替代页面。
+
+重启只恢复持久化状态，不重发任务。检查原网页后，用 `/v1/responses/{id}/resume` 恢复观察；只有显式 `/cancel` 才请求停止对应网页任务。
+
+从第 6 版升级时，先停止旧服务，再执行：
 
 ```sh
-bun runtime/cli.ts migrate
-bun runtime/cli.ts doctor
-bun run dev:app
-bun run verify
-bun run app:package:dir
+bun runtime/cli.ts migrate --home <原有配置目录>
 ```
 
-`dev:app` 使用当前 worktree 的独立测试配置，不占用日常账户目录。`verify` 会真正重新检查证明，而不是信任缓存；同时运行数据库、进程崩溃、HTTP/SSE/MCP 和真实 Electron 本地页面测试，并构建、启动独立运行包。
+迁移保留数据库、日志和浏览器资料，为修改的配置创建备份，删除旧转发、Jev 和自动历史管理设置，不发送消息。旧 API 响应 ID 不会自动转换成新协议的会话标识。调用者需要明确提供上下文建立新根请求；旧操作仍可查看和显式取消，但不能按新协议恢复执行。
 
-检查材料位于 `.build/`，运行包位于 `dist/runtime/`，桌面包位于 `desktop/release/`。自动测试不会向真实 ChatGPT 账户发消息，因此不消耗额度；这也意味着不能把本地页面测试说成真实账户界面、其他操作系统或苹果签名公证已经通过。
+包名、默认资料目录名和桌面应用标识保留旧值，避免升级时意外切换浏览器资料；这不表示仍提供 Codex API 兼容。
 
-[设计与保证边界](docs/rewrite.md) · [验证方法](docs/verification.md) · [安全边界](SECURITY.md)
+## 验证
+
+`bun run verify` 执行 Bend 证明检查、真实实现的变异检查、原生编译、类型检查、SQLite/HTTP/MCP 边界测试、真实 Electron 本地网页测试，以及独立运行包的构建和迁移启动检查。自动测试不使用真实 ChatGPT 账户发送消息。证明覆盖纯决策，操作系统、SQLite 和网页观察仍是明确列出的外部边界。

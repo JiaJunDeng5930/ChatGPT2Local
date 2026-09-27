@@ -7,7 +7,7 @@ import type { Effort, Mode } from "./contracts";
 import { BridgeError } from "./contracts";
 import { DEFAULT_LIMITS, validateLimits, type Limits } from "./prompts";
 
-export const VERSION = "6.0.0";
+export const VERSION = "7.0.0";
 export interface Config {
   version: 1;
   port: number;
@@ -16,9 +16,7 @@ export interface Config {
   browser: { endpoint: string; startUrl: string; hostUrl?: string; hostToken?: string; connectorName?: string };
   efforts: Effort[];
   limits: Limits;
-  native?: { baseUrl: string; keyEnv?: string; authFile?: string };
   tunnel?: { command: string[] };
-  jev?: { baseUrl: string; model: string; keyEnv: string; targetModel: string };
 }
 
 export function homeDirectory(value = process.env.CODEX_CHATGPT_WEB_HOME): string {
@@ -44,8 +42,7 @@ export function atomicFile(path: string, contents: string | Uint8Array): void {
 export function defaultConfig(): Config {
   return { version: 1, port: 8787, mode: "browser-only", token: randomBytes(32).toString("base64url"),
     browser: { endpoint: "http://127.0.0.1:9222", startUrl: "https://chatgpt.com/" },
-    efforts: ["light", "medium", "high", "xhigh", "pro"], limits: { ...DEFAULT_LIMITS },
-    native: { baseUrl: "https://chatgpt.com/backend-api/codex", authFile: join(homedir(), ".codex", "auth.json") } };
+    efforts: ["light", "medium", "high", "xhigh", "pro"], limits: { ...DEFAULT_LIMITS } };
 }
 
 export function localUrl(value: string): URL {
@@ -79,22 +76,14 @@ export function validateConfig(value: unknown): Config {
     if (!c.browser.hostToken || c.browser.hostToken.length < 32) throw new Error("A desktop host requires a private capability");
   }
   validateLimits(c.limits);
-  if (c.native) {
-    remoteUrl(c.native.baseUrl);
-    if (c.native.keyEnv !== undefined && !/^[A-Z_][A-Z0-9_]*$/.test(c.native.keyEnv)) throw new Error("Invalid native key environment variable");
-    if (c.native.authFile !== undefined && (typeof c.native.authFile !== "string" || !c.native.authFile || c.native.authFile.includes("\0"))) throw new Error("Invalid native credential path");
-  }
-  if (c.jev) {
-    if (!c.native) throw new Error("The adaptive route requires a configured native upstream");
-    remoteUrl(c.jev.baseUrl);
-    if (!c.jev.model || !c.jev.targetModel || !/^[A-Z_][A-Z0-9_]*$/.test(c.jev.keyEnv)) throw new Error("Invalid Jev configuration");
-  }
+  if ("native" in c || "jev" in c || "contextTokens" in c.limits || "maxParts" in c.limits)
+    throw new BridgeError("configuration_migration_required", "This profile contains removed forwarding or history settings. Run migrate before serving", 409);
   if (c.tunnel && (!Array.isArray(c.tunnel.command) || !c.tunnel.command.length || c.tunnel.command.some(x => typeof x !== "string" || !x)))
     throw new Error("Tunnel command must be a nonempty argument vector");
   return structuredClone(c);
 }
 
-export function readConfig(home: string, create = false): Config {
+export function readConfig(home: string, create = false, migrate = false): Config {
   const path = join(home, "application.json");
   if (!existsSync(path)) {
     if (!create) throw new BridgeError("setup_required", "Run `codex-chatgpt-web setup` or start the desktop application first", 409);
@@ -113,7 +102,22 @@ export function readConfig(home: string, create = false): Config {
     }
     atomicFile(path, JSON.stringify(config, null, 2) + "\n");
   }
-  return validateConfig(JSON.parse(readFileSync(path, "utf8")));
+  const raw = JSON.parse(readFileSync(path, "utf8"));
+  if (migrate) {
+    const previous = JSON.stringify(raw);
+    delete raw.native;
+    delete raw.jev;
+    if (raw.limits) { delete raw.limits.contextTokens; delete raw.limits.maxParts; }
+    if (raw.browser?.connectorName === "Codex Native2") raw.browser.connectorName = "ChatGPT Web Tools";
+    const migrated = validateConfig(raw);
+    if (previous !== JSON.stringify(raw)) {
+      const backup = `${path}.before-v7`;
+      if (!existsSync(backup)) atomicFile(backup, readFileSync(path));
+      atomicFile(path, JSON.stringify(migrated, null, 2) + "\n");
+    }
+    return migrated;
+  }
+  return validateConfig(raw);
 }
 
 export function writeConfig(home: string, config: Config): void {

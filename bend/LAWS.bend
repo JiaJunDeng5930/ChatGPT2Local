@@ -2,8 +2,6 @@ import Base
 import ./domain.bend as D
 import ./kernel.bend as K
 import ./specification.bend as S
-import ./history.bend as H
-import ./history-specification.bend as HS
 
 law turn_refinement:
   for s: D.Phase
@@ -35,8 +33,3 @@ law send_allowance:
   for s: D.Phase
   for e: D.Event
   {Nat.is_le(Nat.add(D.sends(D.effect(K.step(s, e))), D.allowance(D.phase(K.step(s, e)))), D.allowance(s)) == True{} : Bool}
-
-law history_refinement:
-  for known: List<&2, String>
-  for incoming: List<&2, String>
-  {H.reconcile(known, incoming) == HS.reconcile(known, incoming) : Maybe<&2, Nat>}

@@ -2,12 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fixture, eventually, requestBody } from "./fixtures";
+import { fixture, eventually, requestBody, continuationBody } from "./fixtures";
 import { array, list } from "../runtime/kernel";
 import { parseRequest } from "../runtime/protocol";
 import type { ObjectValue } from "../runtime/contracts";
 
-describe("compiled Bend / SQLite / browser / native Responses boundaries", () => {
+describe("compiled Bend / SQLite / browser / caller-tool boundaries", () => {
   test("an explicit Stop cannot overtake an already claimed physical Send", async () => {
     const f = fixture();
     const order: string[] = [];
@@ -65,8 +65,7 @@ describe("compiled Bend / SQLite / browser / native Responses boundaries", () =>
       expect(output[0]!.type).toBe("function_call");
       const callId = output[0]!.call_id as string;
       expect(f.store.get(initial.id).state.output.$).toBe("None");
-      const nextInput = [...initial.context.input, ...output, { type: "function_call_output", call_id: callId, output: "native receipt" }];
-      const next = f.parse(requestBody("turn-one", nextInput, true));
+      const next = f.parse(continuationBody(String(firstBody.id), [{ type: "function_call_output", call_id: callId, output: "native receipt" }]));
       const final = f.app.response(next);
       expect((await tool).content).toEqual([{ type: "text", text: "native receipt" }]);
       await Bun.sleep(40);
@@ -101,7 +100,8 @@ describe("compiled Bend / SQLite / browser / native Responses boundaries", () =>
       f.browser.failObservation = false;
       await f.app.resume(request.id);
       f.browser.finish(request.id, "Still the original execution.");
-      expect(JSON.parse(await pending).output[0].content[0].text).toBe("Still the original execution.");
+      expect((await pending.catch(error => error)).code).toBe("operation_interrupted");
+      expect(JSON.parse(await f.app.response(request)).output[0].content[0].text).toBe("Still the original execution.");
       expect(f.browser.sends).toHaveLength(1);
     } finally { await f.close(); }
   });
@@ -117,7 +117,7 @@ describe("compiled Bend / SQLite / browser / native Responses boundaries", () =>
       void pending.catch(() => {});
       await eventually(() => array(f.store.get(request.id).state.broker.invocations).length === 1);
       const before = f.store.get(request.id).revision;
-      expect(() => f.store.pollRound(request.id, "failed-encoding", [], () => { throw new Error("fixture encoding failure"); })).toThrow("fixture encoding failure");
+      expect(() => f.store.pollRound(request.id, "failed-encoding", () => { throw new Error("fixture encoding failure"); })).toThrow("fixture encoding failure");
       expect(f.store.get(request.id).revision).toBe(before);
       expect(array(f.store.get(request.id).state.broker.invocations)[0]!.delivery.$).toBe("Queued");
       expect(f.store.round(request.id, "failed-encoding")).toBeUndefined();
@@ -168,22 +168,20 @@ describe("compiled Bend / SQLite / browser / native Responses boundaries", () =>
     } finally { await f.close(); }
   });
 
-  test("retained history reuses only the confirmed prefix on the same owned page", async () => {
+  test("an explicit predecessor sends only new messages on its original page", async () => {
     const f = fixture();
     try {
       const initial = f.parse();
       const first = f.app.response(initial);
       await eventually(() => f.browser.sends.length === 1);
       f.browser.finish(initial.id, "First reply.");
-      const firstReply = JSON.parse(await first) as { output: ObjectValue[] };
-      await eventually(() => f.store.receipts().length === 1);
-      const input = [...initial.context.input, ...firstReply.output, { type: "message", role: "user", content: [{ type: "input_text", text: "Continue." }] }];
-      const next = f.parse(requestBody("turn-two", input));
+      const firstReply = JSON.parse(await first) as { id: string; output: ObjectValue[] };
+      expect(f.store.receipt(f.store.get(initial.id))).toBeDefined();
+      const next = f.parse(continuationBody(firstReply.id, "Continue."));
       const second = f.app.response(next);
       await eventually(() => f.browser.sends.length === 2);
       const preparation = f.browser.prepares.at(-1)!;
       expect(preparation.placement.page).toBe(f.browser.pages.get(initial.id)!.page);
-      expect(preparation.placement.offset).toBe(2);
       expect(preparation.payload).toContain("Continue.");
       expect(preparation.payload).not.toContain("Return a result.");
       f.browser.finish(next.id, "Second reply.");
@@ -191,16 +189,21 @@ describe("compiled Bend / SQLite / browser / native Responses boundaries", () =>
     } finally { await f.close(); }
   });
 
-  test("replaying an older API round cannot shorten the retained transcript", async () => {
+  test("old response replay remains immutable after its successor claims the page", async () => {
     const f = fixture();
     try {
       const request = f.parse();
-      f.store.create(request.id, request.context);
-      const longer = [...request.context.symbols, "a".repeat(64), "b".repeat(64)];
-      f.store.transcript(request.id, longer);
-      f.store.transcript(request.id, request.context.symbols);
-      expect(f.store.get(request.id).transcript).toEqual(longer);
-      expect(() => f.store.transcript(request.id, [...request.context.symbols, "c".repeat(64)])).toThrow();
+      const pending = f.app.response(request);
+      await eventually(() => f.browser.sends.length === 1);
+      f.browser.finish(request.id, "First answer.");
+      const original = await pending;
+      const response = JSON.parse(original);
+      const successor = f.parse(continuationBody(response.id, "New question."));
+      await f.app.submit(successor);
+      await eventually(() => f.browser.sends.length === 2);
+      expect(await f.app.response(request)).toBe(original);
+      expect(() => f.parse(continuationBody(response.id, "A competing question.", "competing"))).toThrow("already has a successor");
+      expect(f.browser.sends).toHaveLength(2);
     } finally { await f.close(); }
   });
 });

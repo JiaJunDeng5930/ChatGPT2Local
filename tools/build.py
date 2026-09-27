@@ -23,7 +23,7 @@ OUT = ROOT / ".build"
 
 
 def execute(args: list[str], timeout: int = 180) -> str:
-    result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, timeout=timeout)
+    result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, timeout=timeout, env={**os.environ, "BEND_NO_TELEMETRY": "1"})
     if result.returncode or result.stderr:
         raise RuntimeError(f"command failed: {args!r}\n{result.stdout}{result.stderr}")
     return result.stdout

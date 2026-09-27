@@ -12,7 +12,7 @@ The current architecture is intentionally independent. The upstream `main` branc
 Review upstream changes that can alter externally observable behavior or compatibility, especially:
 
 - ChatGPT DOM and browser interaction changes;
-- Codex / Responses protocol changes;
+- changes to the shared webpage or MCP boundaries;
 - model, effort, connector, and capability changes;
 - security fixes;
 - account/session behavior relevant to the browser boundary;
@@ -22,7 +22,7 @@ For each relevant change, identify the behavior or requirement it establishes, t
 
 ## Changes normally ignored
 
-Upstream refactors, file moves, launcher internals, tests tied only to the old architecture, and implementation details without a relevant observable requirement do not need to be ported.
+Upstream refactors, file moves, launcher internals, tests tied only to the old architecture, and implementation details without a relevant observable requirement do not need to be ported. Codex/provider compatibility, native forwarding and advisor routing are outside the version 7 API contract; their upstream changes do not justify restoring those layers here.
 
 ## Git policy
 

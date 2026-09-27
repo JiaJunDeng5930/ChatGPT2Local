@@ -15,11 +15,11 @@ function locate(directory: string, depth = 0): string | undefined {
   for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const path = join(directory, entry.name);
     if (process.platform === "darwin" && entry.isDirectory() && entry.name.endsWith(".app")) {
-      const mac = join(path, "Contents/MacOS/Codex Web GPT");
+      const mac = join(path, "Contents/MacOS/ChatGPT Web");
       if (existsSync(mac)) return mac;
     }
-    if (entry.isFile() && process.platform === "linux" && ["codex-web-bend-desktop", "Codex Web GPT"].includes(entry.name)) return path;
-    if (entry.isFile() && process.platform === "win32" && ["Codex Web GPT.exe", "codex-web-bend-desktop.exe"].includes(entry.name)) return path;
+    if (entry.isFile() && process.platform === "linux" && ["codex-web-bend-desktop", "ChatGPT Web"].includes(entry.name)) return path;
+    if (entry.isFile() && process.platform === "win32" && ["ChatGPT Web.exe", "codex-web-bend-desktop.exe"].includes(entry.name)) return path;
     if (entry.isDirectory()) { const found = locate(path, depth + 1); if (found) return found; }
   }
   return undefined;
@@ -47,7 +47,7 @@ try {
   assert.equal(await application.evaluate<boolean, void>(({ app }) => app.isPackaged, undefined), true);
   const cdp = Number(readFileSync(join(home, "desktop/DevToolsActivePort"), "utf8").split("\n")[0]);
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdp}`, { noDefaults: true });
-  const result = fetch(`http://127.0.0.1:${service.port}/v1/responses`, { method: "POST", headers: { authorization: `Bearer ${configuration.token}`, "content-type": "application/json" },
+  const result = fetch(`http://127.0.0.1:${service.port}/v1/responses`, { method: "POST", headers: { authorization: `Bearer ${configuration.token}`, "content-type": "application/json", "idempotency-key": "packaged-local-turn" },
     body: JSON.stringify({ ...requestBody("packaged-local-turn"), stream: false }), signal: AbortSignal.timeout(15000) });
   void result.catch(() => {});
   let page: import("playwright-core").Page | undefined;

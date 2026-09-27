@@ -3,9 +3,10 @@ import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { BridgeError, type Context, type Placement, type RetainedReceipt } from "./contracts";
+import { BridgeError, type Context, type ObjectValue, type Placement, type RetainedReceipt } from "./contracts";
 import { canonical, digest } from "./codec";
-import { compiled, decode, encode, initialize, list as listForStore, transition, type Decision, type Effect, type Input, type State } from "./kernel";
+import { array, compiled, decode, encode, initialize, list as listForStore, transition, type Decision, type Effect, type Input, type State } from "./kernel";
+import type { ParsedRequest, RequestIdentity } from "./protocol";
 
 const FRAME_LIMIT = 64 * 1024 * 1024;
 
@@ -13,7 +14,6 @@ export interface Operation {
   id: string;
   capability: string;
   context: Context;
-  transcript: string[];
   state: State;
   revision: number;
   created: number;
@@ -29,6 +29,10 @@ interface Row {
 
 export interface Change { operation: Operation; decisions: Decision[]; effects: number[]; changed: boolean }
 export interface ClaimedEffect { id: number; operation: string; effect: Effect }
+export interface RequestRecord {
+  key: string; fingerprint: string; previous: string | null; operation: string;
+  response_id: string; kind: "Messages" | "Results"; created: number;
+}
 
 export class Store {
   readonly db: Database;
@@ -65,8 +69,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS rounds(
         operation TEXT NOT NULL REFERENCES operations(id), key TEXT NOT NULL, body TEXT NOT NULL,
         PRIMARY KEY(operation, key));
-      CREATE TABLE IF NOT EXISTS responses(id TEXT PRIMARY KEY, operation TEXT NOT NULL, round_key TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS response_inputs(operation TEXT NOT NULL, round_key TEXT NOT NULL, input TEXT NOT NULL, PRIMARY KEY(operation,round_key));
+      CREATE TABLE IF NOT EXISTS requests(
+        key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, previous TEXT UNIQUE,
+        operation TEXT NOT NULL REFERENCES operations(id), response_id TEXT UNIQUE NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('Messages','Results')), created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS receipts(page TEXT PRIMARY KEY, body TEXT NOT NULL, owner TEXT);
       CREATE TABLE IF NOT EXISTS legacy(id TEXT PRIMARY KEY, status TEXT NOT NULL, source TEXT NOT NULL);
     `);
@@ -126,7 +132,7 @@ export class Store {
   private fromRow(row: Row): Operation {
     if (digest(row.state) !== row.checksum) throw new Error("State checksum mismatch; automatic recovery is prohibited");
     return { id: row.id, capability: row.capability, context: JSON.parse(row.context) as Context,
-      transcript: JSON.parse(row.transcript) as string[], state: decode<State>(row.state, "application-domain.State"),
+      state: decode<State>(row.state, "application-domain.State"),
       revision: row.revision, created: row.created, ...(row.page ? { page: row.page } : {}), ...(row.document ? { document: row.document } : {}),
       placement: JSON.parse(row.placement) as Placement };
   }
@@ -140,6 +146,75 @@ export class Store {
   find(id: string): Operation | undefined {
     const row = this.db.query("SELECT * FROM operations WHERE id=?").get(id) as Row | null;
     return row ? this.fromRow(row) : undefined;
+  }
+
+  request(key: string): RequestRecord | undefined {
+    return (this.db.query("SELECT * FROM requests WHERE key=?").get(key) as RequestRecord | null) ?? undefined;
+  }
+
+  responseRecord(id: string): RequestRecord {
+    const row = this.db.query("SELECT * FROM requests WHERE response_id=?").get(id) as RequestRecord | null;
+    if (!row) throw new BridgeError("previous_response_not_found", "The response is not retained by this API version and profile", 404);
+    return row;
+  }
+
+  /** Preview outside a transaction; authoritative recheck inside admission. */
+  admission(request: RequestIdentity): ReturnType<typeof compiled.request_admit> {
+    const old = this.request(request.round);
+    const key: Parameters<typeof compiled.request_admit>[0] = { $: old
+      ? old.fingerprint === request.fingerprint ? "RepeatedKey" : "ConflictingKey" : "FreshKey" };
+    let parent: Parameters<typeof compiled.request_admit>[1] = { $: "Root" };
+    if (!old && request.previous) {
+      const prior = this.db.query("SELECT * FROM requests WHERE response_id=?").get(request.previous) as RequestRecord | null;
+      if (!prior) parent = { $: "Missing" };
+      else if (this.db.query("SELECT key FROM requests WHERE previous=?").get(request.previous)) parent = { $: "Claimed" };
+      else {
+        const body = this.round(prior.operation, prior.key);
+        const operation = this.get(prior.operation);
+        if (operation.state.broker.lifetime.$ === "Retired") parent = { $: "Unavailable" };
+        else if (!body) parent = { $: "Pending" };
+        else {
+          const status = (JSON.parse(body) as ObjectValue).status;
+          if (status === "requires_action") parent = { $: "Calls" };
+          else if (status === "completed") {
+            const row = operation.page ? this.db.query("SELECT body,owner FROM receipts WHERE page=?").get(operation.page) as { body: string; owner: string | null } | null : null;
+            parent = !row ? { $: "Unavailable" }
+              : row.owner !== null || (JSON.parse(row.body) as RetainedReceipt).operation !== operation.id ? { $: "Claimed" } : { $: "Answered" };
+          } else parent = { $: "Unavailable" };
+        }
+      }
+    }
+    const decision = compiled.request_admit(key, parent, { $: request.kind });
+    if (decision.$ === "Denied") {
+      const errors = {
+        KeyConflict: ["idempotency_conflict", "This Idempotency-Key already belongs to a different request", 409],
+        PreviousMissing: ["previous_response_not_found", "The response is not retained by this API version and profile", 404],
+        PreviousPending: ["previous_response_pending", "Observe the existing request until it returns tool calls or a final answer", 409],
+        PreviousConsumed: ["previous_response_consumed", "This predecessor already has a successor; retry that successor's Idempotency-Key", 409],
+        PreviousUnavailable: ["previous_response_unavailable", "The original webpage is unavailable; no replacement page was allocated", 409],
+        MessagesRequired: ["messages_required", "This predecessor requires new messages, not tool results", 409],
+        ResultsRequired: ["tool_results_required", "Return the complete tool-result batch for this predecessor", 409],
+      } as const;
+      const [code, message, status] = errors[decision.reason.$];
+      throw new BridgeError(code, message, status);
+    }
+    return decision;
+  }
+
+  private registerInside(request: ParsedRequest): void {
+    this.db.query("INSERT INTO requests(key,fingerprint,previous,operation,response_id,kind,created) VALUES(?,?,?,?,?,?,?)")
+      .run(request.round, request.fingerprint, request.previous, request.id, request.responseId, request.kind, Date.now());
+  }
+
+  registerResults(request: ParsedRequest): Operation {
+    return this.atomic(() => {
+      const decision = this.admission(request);
+      if (decision.$ !== "Replay") {
+        if (decision.$ !== "DeliverResults") throw new Error("Tool results require a checked delivery decision");
+        this.registerInside(request);
+      }
+      return this.get(request.id);
+    });
   }
 
   byCapability(capability: string): Operation {
@@ -162,7 +237,7 @@ export class Store {
       if (Buffer.byteLength(encoded) + Buffer.byteLength(frozen) > FRAME_LIMIT) throw new BridgeError("payload_too_large", "The operation exceeds storage capacity", 413);
       const capability = suppliedCapability ?? `turn_${randomBytes(32).toString("base64url")}`;
       this.db.query("INSERT INTO operations(id,token_hash,capability,context,transcript,state,checksum,revision,page,document,placement,created,updated) VALUES(?,?,?,?,?,?,?,0,NULL,NULL,?,?,?)")
-        .run(id, digest(capability), capability, frozen, canonical(context.symbols), encoded, digest(encoded), canonical({ offset: 0 }), Date.now(), Date.now());
+        .run(id, digest(capability), capability, frozen, "[]", encoded, digest(encoded), canonical({}), Date.now(), Date.now());
       return { operation: this.get(id), created: true };
   }
 
@@ -170,17 +245,23 @@ export class Store {
     return this.atomic(() => this.createInside(id, context));
   }
 
-  admit(id: string, context: Context, capability: string, placement: Placement, payloads: string[]): Change & { created: boolean } {
+  admit(request: ParsedRequest, context: Context, capability: string, placement: Placement, payloads: string[]): Change & { created: boolean } {
+    const id = request.id;
     const change = this.atomic(() => {
+      const decision = this.admission(request);
+      if (decision.$ === "Replay") return { operation: this.get(id), created: false, decisions: [], effects: [], changed: false };
+      if (decision.$ !== "NewPage" && decision.$ !== "Append") throw new Error("A browser message requires checked admission");
+      if ((decision.$ === "Append") !== !!placement.page) throw new Error("Placement disagrees with the explicit predecessor");
       const creation = this.createInside(id, context, capability);
-      if (!creation.created) return { operation: creation.operation, created: false, decisions: [], effects: [], changed: false };
+      if (!creation.created) throw new Error("An operation exists without its request identity");
       if (placement.page) {
         const row = this.db.query("SELECT body,owner FROM receipts WHERE page=?").get(placement.page) as { body: string; owner: string | null } | null;
         if (!row || row.owner !== null || canonical(placement.receipt) !== row.body)
-          throw new BridgeError("history_lease_changed", "The retained page was claimed by another operation before admission", 409);
+          throw new BridgeError("previous_response_unavailable", "The original page changed before admission; no replacement page was allocated", 409);
         this.db.query("UPDATE receipts SET owner=? WHERE page=?").run(id, placement.page);
       }
       this.db.query("UPDATE operations SET placement=? WHERE id=?").run(canonical(placement), id);
+      this.registerInside(request);
       const installed = this.changeInside(id, [{ $: "Install", payloads: listForStore(payloads) }]);
       if (installed.decisions[0]?.reply.$ === "Rejected") throw new Error("A newly reserved operation rejected its measured plan");
       return { ...installed, created: true };
@@ -219,13 +300,19 @@ export class Store {
     return { operation: { ...original, state, revision }, decisions, effects, changed: revision !== original.revision };
   }
 
-  change(id: string, inputs: readonly Input[]): Change {
-    const result = this.atomic(() => this.changeInside(id, inputs));
+  change(id: string, inputs: readonly Input[], receipt?: RetainedReceipt): Change {
+    const result = this.atomic(() => {
+      const pending = this.get(id).state.output.$ === "None";
+      const change = this.changeInside(id, inputs);
+      // The final result and its continuation authority commit together.
+      if (receipt && pending && change.operation.state.output.$ === "Some") this.retainInside(receipt);
+      return change;
+    });
     if (result.changed) this.notify(id);
     return result;
   }
 
-  pollRound(id: string, key: string, input: unknown[], encoder: (operation: Operation, decision: Decision) => string | undefined): { body?: string; change?: Change } {
+  pollRound(id: string, key: string, encoder: (operation: Operation, decision: Decision) => string | undefined): { body?: string; change?: Change } {
     const result = this.atomic(() => {
       const cached = this.round(id, key);
       if (cached !== undefined) return { body: cached, change: undefined };
@@ -236,9 +323,6 @@ export class Store {
       if (body !== undefined) {
         if (Buffer.byteLength(body) > FRAME_LIMIT) throw new BridgeError("response_too_large", "The native reply cannot be committed within transport capacity", 413);
         this.db.query("INSERT INTO rounds(operation,key,body) VALUES(?,?,?)").run(id, key, body);
-        this.db.query("INSERT INTO response_inputs(operation,round_key,input) VALUES(?,?,?)").run(id, key, canonical(input));
-        const response = JSON.parse(body) as { id?: unknown };
-        if (typeof response.id === "string") this.db.query("INSERT OR IGNORE INTO responses(id,operation,round_key) VALUES(?,?,?)").run(response.id, id, key);
       }
       return { ...(body !== undefined ? { body } : {}), change };
     });
@@ -284,44 +368,60 @@ export class Store {
     });
   }
 
-  place(id: string, placement: Placement): boolean {
-    return this.atomic(() => {
-      if (placement.page) {
-        const result = this.db.query("UPDATE receipts SET owner=? WHERE page=? AND owner IS NULL").run(id, placement.page);
-        if (result.changes !== 1) return false;
+  receipt(operation: Operation): RetainedReceipt | undefined {
+    if (!operation.page) return undefined;
+    const row = this.db.query("SELECT body,owner FROM receipts WHERE page=?").get(operation.page) as { body: string; owner: string | null } | null;
+    if (!row || row.owner !== null) return undefined;
+    const receipt = JSON.parse(row.body) as RetainedReceipt;
+    return receipt.operation === operation.id ? receipt : undefined;
+  }
+
+  private retainInside(receipt: RetainedReceipt): void {
+    const op = this.get(receipt.operation);
+    if (op.state.output.$ !== "Some" || op.page !== receipt.page || op.document !== receipt.document || op.state.latest !== receipt.answer)
+      throw new Error("A continuation requires its committed final answer and original document");
+    const old = this.db.query("SELECT body,owner FROM receipts WHERE page=?").get(receipt.page) as { body: string; owner: string | null } | null;
+    if (old) {
+      const previous = JSON.parse(old.body) as RetainedReceipt;
+      if (previous.operation === op.id) return; // Never release a successor's existing claim.
+      if (old.owner !== op.id || op.placement.receipt?.operation !== previous.operation)
+        throw new Error("A stale final receipt cannot replace the current page owner");
+    }
+    this.db.query("INSERT INTO receipts(page,body,owner) VALUES(?,?,NULL) ON CONFLICT(page) DO UPDATE SET body=excluded.body,owner=NULL")
+      .run(receipt.page, canonical(receipt));
+  }
+
+  /** Validate and commit the complete result batch and causal fence atomically. */
+  completeResults(request: ParsedRequest, baseline: string): Change {
+    const change = this.atomic(() => {
+      const operation = this.get(request.id);
+      const invocations = array(operation.state.broker.invocations);
+      const inputs: Input[] = [];
+      for (const result of request.results) {
+        const id = String(result.call_id);
+        const invocation = invocations.find(item => item.id === id);
+        if (!invocation || invocation.delivery.$ === "Queued")
+          throw new BridgeError("result_before_delivery", "A result must name a delivered call from the predecessor response", 409);
+        const body = canonical(result.output);
+        if (Buffer.byteLength(body) > FRAME_LIMIT) throw new BridgeError("result_too_large", "A result exceeds storage capacity", 413);
+        const hash = digest(body);
+        const old = this.blob(operation.id, `result:${id}`);
+        if ((old !== undefined && old !== body) || (invocation.delivery.$ === "Result" && invocation.delivery.digest !== hash))
+          throw new BridgeError("conflicting_receipt", "A delivered result already has different contents", 409);
+        if (invocation.delivery.$ === "Result") continue;
+        this.db.query("INSERT OR IGNORE INTO blobs(operation,key,digest,body) VALUES(?,?,?,?)").run(operation.id, `result:${id}`, hash, body);
+        inputs.push({ $: "ToolResult", id, digest: hash, baseline });
       }
-      this.db.query("UPDATE operations SET placement=? WHERE id=?").run(canonical(placement), id);
-      return true;
-    });
-  }
-
-  receipts(): RetainedReceipt[] {
-    return (this.db.query("SELECT body FROM receipts WHERE owner IS NULL ORDER BY page").all() as { body: string }[]).map(row => JSON.parse(row.body) as RetainedReceipt);
-  }
-
-  retain(receipt: RetainedReceipt): void {
-    this.atomic(() => {
-      const op = this.get(receipt.operation);
-      if (op.state.output.$ !== "Some" || op.page !== receipt.page || op.document !== receipt.document)
-        throw new Error("A retained page requires its committed final receipt");
-      this.db.query("INSERT INTO receipts(page,body,owner) VALUES(?,?,NULL) ON CONFLICT(page) DO UPDATE SET body=excluded.body,owner=NULL").run(receipt.page, canonical(receipt));
-    });
-  }
-
-  transcript(id: string, symbols: string[]): void {
-    this.atomic(() => {
-      const operation = this.get(id);
-      const old = operation.transcript;
-      const environment = operation.context.environment;
-      const extendsOld = compiled.history_plan(environment, environment, listForStore(old), listForStore([...symbols, "!transport-end"]));
-      if (extendsOld.$ === "Some" && extendsOld.value === BigInt(old.length)) {
-        this.db.query("UPDATE operations SET transcript=? WHERE id=?").run(canonical(symbols), id);
-        return;
+      const accepted = this.changeInside(operation.id, inputs);
+      for (const decision of accepted.decisions) {
+        const reply = decision.reply;
+        if (reply.$ !== "ToolReceipt" || (reply.receipt.$ !== "ResultAccepted" && reply.receipt.$ !== "ResultReplayed"))
+          throw new BridgeError("tool_result_not_accepted", "The checked operation no longer accepts this result; no result blobs were committed", 409);
       }
-      const replaysOld = compiled.history_plan(environment, environment, listForStore(symbols), listForStore([...old, "!transport-end"]));
-      if (replaysOld.$ !== "Some" || replaysOld.value !== BigInt(symbols.length))
-        throw new BridgeError("history_branch_conflict", "Concurrent API rounds disagree about the retained transcript. The webpage is not changed.", 409);
+      return accepted;
     });
+    if (change.changed) this.notify(request.id);
+    return change;
   }
 
   putBlob(id: string, key: string, body: string): string {
@@ -360,25 +460,11 @@ export class Store {
     return (this.db.query("SELECT body FROM rounds WHERE operation=? AND key=?").get(id, key) as { body: string } | null)?.body;
   }
 
-  saveRound(id: string, key: string, body: string, input?: unknown[]): string {
-    if (Buffer.byteLength(body) > FRAME_LIMIT) throw new BridgeError("response_too_large", "Encoded response exceeds storage capacity", 413);
-    return this.atomic(() => {
-      this.db.query("INSERT OR IGNORE INTO rounds(operation,key,body) VALUES(?,?,?)").run(id, key, body);
-      const saved = this.round(id, key)!;
-      this.db.query("INSERT OR IGNORE INTO response_inputs(operation,round_key,input) VALUES(?,?,?)").run(id, key, canonical(input ?? this.get(id).context.input));
-      const response = JSON.parse(saved) as { id?: unknown };
-      if (typeof response.id === "string") this.db.query("INSERT OR IGNORE INTO responses(id,operation,round_key) VALUES(?,?,?)").run(response.id, id, key);
-      return saved;
-    });
-  }
-
-  previous(response: string): { operation: Operation; input: import("./contracts").ObjectValue[]; output: unknown[] } {
-    const row = this.db.query("SELECT operation,round_key FROM responses WHERE id=?").get(response) as { operation: string; round_key: string } | null;
-    if (!row) throw new BridgeError("previous_response_not_found", "The previous response is not retained in this profile", 404);
-    const body = JSON.parse(this.round(row.operation, row.round_key)!) as { output: unknown[] };
-    const source = this.db.query("SELECT input FROM response_inputs WHERE operation=? AND round_key=?").get(row.operation, row.round_key) as { input: string } | null;
-    if (!source) throw new BridgeError("previous_input_missing", "The previous response's exact input is not retained", 409);
-    return { operation: this.get(row.operation), input: JSON.parse(source.input), output: body.output };
+  previous(response: string): { operation: Operation; body: ObjectValue; key: string } {
+    const record = this.responseRecord(response);
+    const body = this.round(record.operation, record.key);
+    if (body === undefined) throw new BridgeError("previous_response_pending", "The response has no committed output yet", 409);
+    return { operation: this.get(record.operation), body: JSON.parse(body) as ObjectValue, key: record.key };
   }
 
   setting<T>(key: string): T | undefined {
@@ -394,7 +480,7 @@ export class Store {
     return (this.db.query("SELECT * FROM operations ORDER BY updated DESC LIMIT 200").all() as Row[]).map(row => {
       const op = this.fromRow(row);
       const phase = op.state.batch.$ === "Batch" || op.state.batch.$ === "Closed" ? op.state.batch.phase.$ : "Prepared";
-      return { id: op.id, model: op.context.model, purpose: op.context.purpose, phase, revision: op.revision, page: op.page ?? null,
+      return { id: op.id, model: op.context.model, phase, revision: op.revision, page: op.page ?? null,
         // Capabilities, contexts, credentials, and tool payloads are never dashboard fields.
         updated: (row as Row & { updated: number }).updated };
     });

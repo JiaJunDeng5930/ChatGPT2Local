@@ -5,7 +5,7 @@ import { BridgeError, type Browser, type Context, type ObjectValue, type Placeme
 import { canonical, digest, object } from "./codec";
 import { array, compiled, list, type Decision, type Input, type Invocation } from "./kernel";
 import { attachments, DEFAULT_LIMITS, plan, tokens, type Limits } from "./prompts";
-import { finalOutput, finalReceipt, responseObject, symbol, toolOutput, validateArguments, validateContinuation, type ParsedRequest } from "./protocol";
+import { finalReceipt, responseObject, toolOutput, validateArguments, type ParsedRequest } from "./protocol";
 import { Store, type Change, type Operation } from "./store";
 
 interface ObservationHandle {
@@ -65,17 +65,14 @@ export class Application {
     this.store.change(id, [{ $: "Uncertain" }]);
   }
 
-  private async select(context: Context): Promise<Placement> {
-    if (context.purpose !== "response") return { offset: 0 };
-    const receipts = this.store.receipts();
-    const selected = compiled.history_select(list(receipts.map(receipt => ({ $: "Receipt" as const, key: receipt.page,
-      environment: receipt.environment, messages: list(receipt.symbols) }))), context.environment, list(context.symbols));
-    if (selected.$ !== "ReuseConversation") return { offset: 0 };
-    const receipt = receipts.find(receipt => receipt.page === selected.key);
-    if (!receipt) throw new Error("The Bend history decision references no receipt");
+  private async select(parsed: ParsedRequest): Promise<Placement> {
+    if (!parsed.previous) return {};
+    const previous = this.store.previous(parsed.previous).operation;
+    const receipt = this.store.receipt(previous);
+    if (!receipt) throw new BridgeError("previous_response_unavailable", "The predecessor no longer owns an available webpage", 409);
     let snapshot: Snapshot;
     try { snapshot = await this.browser.inspect(receipt.page); }
-    catch { return { offset: 0 }; } // A new operation may use a new page; the old one is untouched.
+    catch { throw new BridgeError("previous_response_unavailable", "The original webpage is unavailable; no replacement was allocated", 409); }
     const reusable = compiled.surface_resume({ $: "Evidence", present: snapshot.facts.present,
       untouched: snapshot.untouched && snapshot.document === receipt.document && snapshot.assistant === receipt.assistant,
       idle: !snapshot.facts.running && !snapshot.facts.reply_error && !snapshot.facts.stopped_badge,
@@ -83,41 +80,29 @@ export class Application {
       recorded_key: receipt.page, key: snapshot.page,
       recorded_operation: receipt.operation, operation: snapshot.operation,
       recorded_answer: receipt.answer, expected_answer: receipt.answer, answer: snapshot.text });
-    return reusable ? { page: receipt.page, offset: Number(selected.offset), receipt } : { offset: 0 };
+    if (!reusable) throw new BridgeError("previous_response_unavailable", "The original page or its final answer changed; no replacement was allocated", 409);
+    return { page: receipt.page, receipt };
   }
 
   async submit(parsed: ParsedRequest): Promise<Operation> {
-    const existing = this.store.find(parsed.id);
-    if (existing) {
-      validateContinuation(existing, parsed);
-      this.store.transcript(parsed.id, parsed.context.symbols);
+    const admission = this.store.admission(parsed);
+    if (admission.$ === "Replay") {
+      if (parsed.kind === "Results" && this.store.round(parsed.id, parsed.round) === undefined) await this.receiveResults(parsed);
+      return this.store.get(parsed.id);
+    }
+    if (parsed.kind === "Results") {
+      this.store.registerResults(parsed);
       await this.receiveResults(parsed);
       return this.store.get(parsed.id);
     }
     const context: Context = { ...parsed.context, attachments: attachments(parsed.context) };
     const capability = `turn_${randomBytes(32).toString("base64url")}`;
-    let placement = await this.select(context);
-    let preparedPlan = plan(context, capability, placement.offset, this.limits);
-    context.measurement = { inputTokens: preparedPlan.inputTokens, offset: placement.offset, parts: preparedPlan.payloads.length };
-    let admission: Change & { created: boolean };
-    try {
-      admission = this.store.admit(parsed.id, context, capability, placement, preparedPlan.payloads);
-    } catch (error) {
-      if (!(error instanceof BridgeError) || error.code !== "history_lease_changed") throw error;
-      // The first transaction rolled back before any effect existed. This is a
-      // distinct operation's placement decision, not a webpage retry.
-      placement = { offset: 0 };
-      preparedPlan = plan(context, capability, 0, this.limits);
-      context.measurement = { inputTokens: preparedPlan.inputTokens, offset: 0, parts: preparedPlan.payloads.length };
-      admission = this.store.admit(parsed.id, context, capability, placement, preparedPlan.payloads);
-    }
-    if (!admission.created) {
-      validateContinuation(admission.operation, parsed);
-      await this.receiveResults(parsed);
-      return this.store.get(parsed.id);
-    }
-    this.dispatch(admission);
-    return admission.operation;
+    const placement = await this.select(parsed);
+    const prepared = plan(context, capability, parsed.previous !== null, this.limits);
+    context.measurement = { inputTokens: prepared.inputTokens };
+    const admissionResult = this.store.admit(parsed, context, capability, placement, prepared.payloads);
+    if (admissionResult.created) this.dispatch(admissionResult);
+    return admissionResult.operation;
   }
 
   private dispatch(change: Change): void {
@@ -133,8 +118,8 @@ export class Application {
     void job.finally(() => { if (this.effects.get(id) === job) this.effects.delete(id); });
   }
 
-  private apply(id: string, input: Input): Decision {
-    const change = this.store.change(id, [input]);
+  private apply(id: string, input: Input, receipt?: RetainedReceipt): Decision {
+    const change = this.store.change(id, [input], receipt);
     this.dispatch(change);
     return change.decisions.at(-1)!;
   }
@@ -152,7 +137,7 @@ export class Application {
             const batch = operation.state.batch;
             const isFinal = batch.$ === "Batch" && batch.pending.$ === "Nil";
             const context = { ...operation.context,
-              attachments: isFinal ? operation.context.attachments.filter(image => image.message >= operation.placement.offset) : [] };
+              attachments: isFinal ? operation.context.attachments : [] };
             const page = await this.browser.prepare(operation.id, Number(effect.slot), effect.payload, context, operation.placement);
             this.store.bindPage(operation.id, page.page, page.document);
             this.apply(operation.id, { $: "Ready" });
@@ -183,10 +168,10 @@ export class Application {
         if (observer) observer.last = snapshot;
         this.apply(operation.id, { $: "Observe", facts: snapshot.facts, text: snapshot.text, signature: snapshot.signature,
           now: BigInt(Date.now()), stable_ms: BigInt(this.stabilityInterval), revision: operation.state.broker.revision, slot: BigInt(snapshot.slot) });
-        this.apply(operation.id, { $: "Encoded", revision: effect.revision, signature: effect.signature, output });
+        this.apply(operation.id, { $: "Encoded", revision: effect.revision, signature: effect.signature, output },
+          { operation: operation.id, page: snapshot.page, document: snapshot.document, assistant: snapshot.assistant, answer: snapshot.text });
       } else if (effect.$ === "Publish") {
         this.stopObservation(operation.id);
-        await this.retain(this.store.get(operation.id));
       }
       this.store.settle(id, true);
     } catch (error) {
@@ -236,47 +221,59 @@ export class Application {
     void handle.inFlight.catch(() => {});
   }
 
-  private async retain(operation: Operation): Promise<void> {
-    if (operation.context.purpose !== "response" || !operation.page || !operation.document) return;
-    const last = this.observers.get(operation.id)?.last;
-    if (!last || last.page !== operation.page || last.document !== operation.document || last.text !== operation.state.latest) return;
-    const answer = finalOutput(operation, operation.state.latest).at(-1);
-    if (!answer || answer.type !== "message") return;
-    const receipt: RetainedReceipt = { operation: operation.id, page: operation.page, document: operation.document,
-      assistant: last.assistant, answer: operation.state.latest, environment: operation.context.environment,
-      symbols: [...operation.transcript, symbol(answer)] };
-    this.store.retain(receipt);
+  private async receiveResults(parsed: ParsedRequest): Promise<void> {
+    const operation = this.store.get(parsed.id);
+    const invocations = array(operation.state.broker.invocations);
+    if (parsed.results.every(result => invocations.find(call => call.id === result.call_id)?.delivery.$ === "Result")) {
+      this.store.completeResults(parsed, operation.state.latest);
+      return;
+    }
+    let baseline = operation.state.latest;
+    const observer = this.observers.get(operation.id);
+    if (observer && !observer.paused) {
+      try {
+        const snapshot = await this.browser.snapshot(operation.id);
+        if (snapshot.operation !== operation.id || snapshot.page !== operation.page || snapshot.document !== operation.document)
+          throw new Error("Tool boundary changed document");
+        baseline = snapshot.text;
+        observer.last = snapshot;
+      } catch { this.fault(operation.id, "tool_boundary_observation_failed"); }
+    } else this.fault(operation.id, "tool_boundary_observation_failed");
+    // A failed observation blocks final publication, not delivery of known tool
+    // results. Replay after restart can still finish the committed result batch.
+    this.store.completeResults(parsed, baseline);
   }
 
-  private async receiveResults(parsed: ParsedRequest): Promise<void> {
-    for (const result of parsed.results) {
-      const id = typeof result.call_id === "string" ? result.call_id : undefined;
-      if (!id) continue;
-      const operation = this.store.get(parsed.id);
-      const invocation = array(operation.state.broker.invocations).find(invocation => invocation.id === id);
-      if (!invocation) continue; // Earlier history belongs to earlier operations.
-      if (invocation.delivery.$ === "Queued") throw new BridgeError("result_before_delivery", "A native result arrived before its invocation was delivered", 409);
-      const body = canonical(result.type === "tool_search_output" ? result : result.output ?? "");
-      const hash = this.store.putBlob(operation.id, `result:${id}`, body);
-      if (invocation.delivery.$ === "Result") {
-        this.apply(operation.id, { $: "ToolResult", id, digest: hash, baseline: operation.state.latest });
-        continue;
+  private poll(id: string, round: string): string | undefined {
+    const request = this.store.request(round);
+    if (!request || request.operation !== id) throw new Error("A response requires its durable request identity");
+    return this.store.pollRound(id, round, (operation, decision) => {
+      const reply = decision.reply;
+      if (reply.$ === "FinalReceipt") {
+        const final = object(JSON.parse(reply.output));
+        return canonical(responseObject(operation, request, (final.output as ObjectValue[]), final.usage ?? null));
       }
-      let baseline = operation.state.latest;
-      const observer = this.observers.get(operation.id);
-      if (observer && !observer.paused) {
-        try {
-          const snapshot = await this.browser.snapshot(operation.id);
-          if (snapshot.page !== operation.page || snapshot.document !== operation.document) throw new Error("Tool boundary changed document");
-          baseline = snapshot.text;
-          observer.last = snapshot;
-        } catch { this.fault(operation.id, "tool_boundary_observation_failed"); }
-      } else this.fault(operation.id, "tool_boundary_observation_failed");
-      // The tool result is still returned if observing its webpage fails. The
-      // completion observer remains paused, so that failure cannot publish an
-      // old answer or disrupt a healthy remote tool execution.
-      this.apply(operation.id, { $: "ToolResult", id, digest: hash, baseline });
-    }
+      if (reply.$ !== "ToolReceipt" || (reply.receipt.$ !== "CallsDelivered" && reply.receipt.$ !== "CallsReplayed")) return undefined;
+      const ids = array(reply.receipt.ids);
+      const invocations = array(operation.state.broker.invocations);
+      const output = ids.map(id => {
+        const invocation = invocations.find(invocation => invocation.id === id);
+        if (!invocation) throw new Error("Delivered invocation missing from durable state");
+        return toolOutput(invocation, operation.context.tools);
+      });
+      return canonical(responseObject(operation, request, output));
+    }).body;
+  }
+
+  resource(responseId: string): ObjectValue {
+    const record = this.store.responseRecord(responseId);
+    const saved = this.poll(record.operation, record.key);
+    if (saved !== undefined) return object(JSON.parse(saved));
+    const operation = this.store.get(record.operation);
+    const fault = this.store.setting<{ code: string } | null>(`fault:${operation.id}`);
+    return { ...responseObject(operation, record, []),
+      status: operation.state.broker.lifetime.$ === "Retired" ? "cancelled" : fault ? "interrupted" : "in_progress",
+      ...(fault ? { error: { code: fault.code, message: "Inspect the original page and explicitly resume observation" } } : {}) };
   }
 
   async response(parsed: ParsedRequest, signal?: AbortSignal): Promise<string> {
@@ -284,31 +281,20 @@ export class Application {
     await this.submit(parsed);
     try {
       for (;;) {
-        if (signal?.aborted) throw signal.reason ?? new DOMException("Observer detached", "AbortError");
+        if (signal.aborted) throw signal.reason ?? new DOMException("Observer detached", "AbortError");
         const wait = waitForChange(this.store, parsed.id, signal);
         try {
-          const polled = this.store.pollRound(parsed.id, parsed.round, parsed.context.input, (operation, decision) => {
-            const reply = decision.reply;
-            if (reply.$ === "FinalReceipt") return reply.output;
-            if (reply.$ === "CancelledReceipt") throw new BridgeError("operation_cancelled", "The user explicitly cancelled this operation", 409);
-            if (reply.$ !== "ToolReceipt" || !["CallsDelivered", "CallsReplayed"].includes(reply.receipt.$)) return undefined;
-            const receipt = reply.receipt;
-            if (receipt.$ !== "CallsDelivered" && receipt.$ !== "CallsReplayed") return undefined;
-            const ids = array(receipt.ids);
-            const invocations = array(operation.state.broker.invocations);
-            const output = ids.map(id => {
-              const invocation = invocations.find(invocation => invocation.id === id);
-              if (!invocation) throw new Error("Delivered invocation missing from durable state");
-              return toolOutput(invocation, operation.context.tools);
-            });
-            return canonical(responseObject(operation, parsed.round, output));
-          });
-          if (polled.body !== undefined) return polled.body;
+          const body = this.poll(parsed.id, parsed.round);
+          if (body !== undefined) return body;
+          const operation = this.store.get(parsed.id);
+          if (operation.state.broker.lifetime.$ === "Retired") throw new BridgeError("operation_cancelled", "The user explicitly cancelled this operation", 409);
+          const fault = this.store.setting<{ code: string } | null>(`fault:${parsed.id}`);
+          if (fault) throw new BridgeError("operation_interrupted", `Observation is interrupted (${fault.code}); inspect and resume the original page`, 409);
           await wait.promise;
         } finally { wait.dispose(); }
       }
     } finally {
-      if (signal?.aborted) this.apply(parsed.id, { $: "Detached" });
+      if (signal.aborted) this.apply(parsed.id, { $: "Detached" });
     }
   }
 
@@ -411,6 +397,8 @@ export class Application {
 
   async resume(id: string, acceptCurrentAnswer = false): Promise<void> {
     const operation = this.store.get(id);
+    if (!this.store.db.query("SELECT key FROM requests WHERE operation=? LIMIT 1").get(id))
+      throw new BridgeError("legacy_protocol_unavailable", "Old-protocol operations are retained for inspection and explicit cancellation, not converted into new requests", 409);
     if (!operation.page || !operation.document) throw new BridgeError("page_not_bound", "No original owned page is recorded. A new page is not a recovery action.", 409);
     const fault = this.store.setting<{ code: string } | null>(`fault:${id}`);
     if (fault?.code === "tool_boundary_observation_failed" && !acceptCurrentAnswer)
@@ -450,21 +438,15 @@ export function mcpResult(value: unknown): ObjectValue {
     const result = object(value);
     if (Array.isArray(result.content)) {
       const content = result.content.map(raw => {
-        const part = object(raw, "native tool result part");
+        const part = object(raw, "caller tool result part");
         if (part.type === "text" && typeof part.text === "string") return part;
         if (part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string") return part;
-        throw new BridgeError("unsupported_native_result_part", "The native tool returned a content part this MCP transport cannot encode", 422);
+        throw new BridgeError("unsupported_tool_result_part", "The caller tool returned a content part this MCP transport cannot encode", 422);
       });
       return { content, ...(result.isError === true ? { isError: true } : {}), ...(result.structuredContent && typeof result.structuredContent === "object" ? { structuredContent: result.structuredContent } : {}) };
     }
   }
-  if (typeof value === "string") {
-    // A native function_call_output may serialize an MCP result once. Preserve
-    // its images and error bit rather than burying them in a JSON text block.
-    try {
-      const parsed: unknown = JSON.parse(value);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray((parsed as { content?: unknown }).content)) return mcpResult(parsed);
-    } catch { /* Ordinary text remains ordinary text. */ }
-  }
+  // Strings are verbatim text. Rich MCP output is an explicit JSON object;
+  // never guess whether a string should be parsed a second time.
   return { content: [{ type: "text", text: typeof value === "string" ? value : canonical(value) }] };
 }

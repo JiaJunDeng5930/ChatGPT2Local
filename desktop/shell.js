@@ -5,7 +5,6 @@ let surface = "browser";
 let sidebarOpen = true;
 let mcpStep = 0;
 let setupMessage = "";
-let modelsInstalled = false;
 let doctorReport = null;
 let refreshing = false;
 
@@ -86,24 +85,11 @@ function renderSetup() {
   const hasPage = snapshot.tabs?.length > 0;
   el("setup-chatgpt").classList.toggle("is-complete", hasPage);
   el("setup-runtime").classList.toggle("is-complete", snapshot.running);
-  el("setup-codex").classList.toggle("is-complete", modelsInstalled);
   el("setup-open").textContent = hasPage ? "Open another page" : "Open ChatGPT";
   el("setup-runtime-action").textContent = snapshot.running ? "Restart runtime" : "Start runtime";
   el("setup-message").hidden = !setupMessage;
   el("setup-message").textContent = setupMessage;
   el("setup-message").className = "notice-row is-success";
-}
-function renderAstra() {
-  if (!snapshot) return;
-  const card = el("astra-card"); card.replaceChildren();
-  if (!snapshot.config?.jev) {
-    const text = document.createElement("p"); text.textContent = "Astra Jev is not configured in this profile. The webpage path remains independent of this optional native route."; card.append(text); return;
-  }
-  const dl = document.createElement("dl");
-  for (const [label, value] of [["Advisor", snapshot.config.jev.baseUrl], ["Model", snapshot.config.jev.model], ["Credential", snapshot.config.jev.keyEnv], ["Target", snapshot.config.jev.targetModel]]) {
-    const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = label; dd.textContent = value; dl.append(dt, dd);
-  }
-  card.append(dl);
 }
 function renderMcp() {
   document.querySelectorAll(".wizard-stepper button").forEach(button => button.classList.toggle("is-active", Number(button.dataset.step) === mcpStep));
@@ -113,9 +99,9 @@ function renderMcp() {
   if (!snapshot) return;
   const full = snapshot.config?.mode === "full";
   el("mcp-mode-notice").className = `notice-row ${full ? "is-success" : "is-warning"}`;
-  el("mcp-mode-notice").textContent = full ? "Full mode is configured. Restart the runtime after configuration changes." : "Browser-only is active; native connector requests are disabled.";
+  el("mcp-mode-notice").textContent = full ? "Full mode is configured. Restart the runtime after configuration changes." : "Browser-only is active; caller-tool requests are disabled.";
   el("mcp-enable-full").disabled = full;
-  el("connector-name").textContent = snapshot.config?.connectorName || "Codex Native2";
+  el("connector-name").textContent = snapshot.config?.connectorName || "ChatGPT Web Tools";
   el("connector-address").textContent = snapshot.status?.connector || (full ? "Runtime status unavailable" : "Disabled in browser-only mode");
   el("mcp-tunnel-toggle").textContent = snapshot.tunnelRunning ? "Stop tunnel" : "Start tunnel";
   el("mcp-tunnel-toggle").disabled = !snapshot.config?.tunnelConfigured;
@@ -165,7 +151,7 @@ function renderSidebar() {
 function render() {
   document.querySelectorAll(".surface").forEach(node => { node.hidden = node.id !== `surface-${surface}`; });
   document.querySelectorAll(".sidebar-item[data-surface]").forEach(node => node.classList.toggle("is-active", node.dataset.surface === surface));
-  renderSidebar(); renderBrowser(); renderSetup(); renderAstra(); renderMcp(); renderActivity(); renderSettings();
+  renderSidebar(); renderBrowser(); renderSetup(); renderMcp(); renderActivity(); renderSettings();
   if (snapshot?.fault) showError(snapshot.fault);
 }
 
@@ -177,7 +163,6 @@ el("new-tab").addEventListener("click", openChat); el("browser-open").addEventLi
 for (const [id, direction] of [["browser-back", "back"], ["browser-forward", "forward"], ["browser-reload", "reload"]]) el(id).addEventListener("click", () => void invoke("navigate", { direction }).then(mergeState).catch(showError));
 for (const [id, direction] of [["browser-zoom-out", "out"], ["browser-zoom-reset", "reset"], ["browser-zoom-in", "in"]]) el(id).addEventListener("click", () => void invoke("zoom", { direction }).then(mergeState).catch(showError));
 el("setup-runtime-action").addEventListener("click", async () => { try { snapshot = await invoke("restart-runtime"); render(); } catch (error) { showError(error); } });
-el("setup-install").addEventListener("click", async () => { try { const result = await invoke("install-models"); modelsInstalled = true; setupMessage = result.message || "Codex model profile installed."; snapshot = result.snapshot; render(); } catch (error) { showError(error); } });
 el("setup-mcp").addEventListener("click", () => setSurface("mcp"));
 
 document.querySelectorAll(".wizard-stepper button").forEach(button => button.addEventListener("click", () => { mcpStep = Number(button.dataset.step); renderMcp(); }));

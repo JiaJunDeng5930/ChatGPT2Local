@@ -2,6 +2,7 @@
 """Challenge the real checker and emitted program, never a handwritten model."""
 from __future__ import annotations
 import hashlib
+import os
 import json
 from pathlib import Path
 import shutil
@@ -13,7 +14,7 @@ ROOT = build.ROOT
 PIN = json.loads((build.SOURCE / "toolchain.json").read_text())
 
 def check(path: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([build.compiler(), str(path), "--check-only"], cwd=cwd, capture_output=True, text=True, timeout=90)
+    return subprocess.run([build.compiler(), str(path), "--check-only"], cwd=cwd, capture_output=True, text=True, timeout=90, env={**os.environ, "BEND_NO_TELEMETRY": "1"})
 
 def pure(result: subprocess.CompletedProcess[str]) -> bool:
     return result.returncode == 0 and result.stderr == "" and result.stdout.strip() == PIN["pure_success"]
@@ -46,17 +47,14 @@ MUTATIONS = [
     ("uncertainty-is-not-send-permission", "kernel.bend",
      "case D.Uncertain{}: D.Decision{D.Fresh{}, D.NoEffect{}}",
      "case D.Uncertain{}: D.Decision{D.Fresh{}, D.SendPrompt{}}"),
-    ("divergent-history-is-not-a-prefix", "history.bend", "case False{}: None{}", "case False{}: Some{0n}"),
     ("local-tools-participate-in-the-final-fence", "broker-table.bend",
      "Bool.or(has_activity(activities), has_invocation(invocations))", "has_invocation(invocations)"),
     ("transport-detachment-is-not-user-cancellation", "application.bend",
      "case A.Detached{}: control(s, T.Detach{})", "case A.Detached{}: control(s, T.UserCancel{})"),
-    ("adaptive-recovery-cannot-reclassify", "routing.bend",
-     "case D.Recover{}: D.Decision{D.Unknown{}, D.NeedsAttention{}}",
-     "case D.Recover{}: D.Decision{D.Choosing{}, D.Classify{}}"),
-    ("adaptive-leases-respect-environment", "routing.bend",
-     "H.plan(old_environment, environment, old_history, history)",
-     "H.plan(environment, environment, old_history, history)"),
+    ("consumed-predecessor-cannot-append", "request.bend",
+     "case D.Claimed{}: D.Denied{D.PreviousConsumed{}}", "case D.Claimed{}: D.Append{}"),
+    ("request-retry-cannot-create-a-page", "request.bend",
+     "case D.RepeatedKey{}: D.Replay{}", "case D.RepeatedKey{}: D.NewPage{}"),
     ("encoded-output-cannot-ignore-current-evidence", "application.bend",
      "encode_checked(Bool.and(Nat.is_eq(expected, revision),\n        Bool.and(Nat.is_eq(K.revision(A.broker(s)), revision), String.eq(previous, signature))),",
      "encode_checked(True{},"),
@@ -102,7 +100,7 @@ def graph_guards(cache: Path) -> list[str]:
                 elif name == "unchecked-source":
                     path = source / "kernel.bend"; path.write_text(path.read_text() + "\n@unsafe def escaped(n: Nat) -> Nat: escaped(n)\n")
                 elif name == "specification-alias":
-                    path = source / "routing-specification.bend"; path.write_text(path.read_text() + "\nimport ./routing.bend as Alias\n")
+                    path = source / "request-specification.bend"; path.write_text(path.read_text() + "\nimport ./request.bend as Alias\n")
                 else:
                     path = source / "PROOF.bend"; path.write_text("\n".join(line for line in path.read_text().splitlines() if "./api.bend" not in line and "./native-protocol.bend" not in line) + "\n")
                 try: build.audit()

@@ -8,8 +8,7 @@ export type Effort = "light" | "medium" | "high" | "xhigh" | "pro";
 export interface Tool {
   wire: string;
   name: string;
-  namespace?: string;
-  kind: "function" | "custom" | "tool_search";
+  kind: "function" | "custom";
   description: string;
   schema: ObjectValue;
 }
@@ -28,21 +27,16 @@ export interface Context {
   effort: Effort;
   mode: Mode;
   environment: string;
-  purpose: "response" | "compact-v1" | "compact-v2";
   instructions: string;
   input: ObjectValue[];
-  symbols: string[];
   tools: Tool[];
   attachments: Attachment[];
   textFormat?: ObjectValue;
-  thread?: string;
-  turn?: string;
-  measurement?: { inputTokens: number; offset: number; parts: number };
+  measurement?: { inputTokens: number };
 }
 
 export interface Placement {
   page?: string;
-  offset: number;
   receipt?: RetainedReceipt;
 }
 
@@ -52,8 +46,6 @@ export interface RetainedReceipt {
   document: string;
   assistant: string;
   answer: string;
-  environment: string;
-  symbols: string[];
 }
 
 export interface Prepared {

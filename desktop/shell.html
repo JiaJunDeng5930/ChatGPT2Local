@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Codex Web GPT</title>
+  <title>ChatGPT Web</title>
   <link rel="stylesheet" href="shell.css">
 </head>
 <body>
@@ -20,14 +20,13 @@
       <div class="sidebar-brand-row">
         <div class="sidebar-brand-identity">
           <span class="brand-mark" aria-hidden="true">✣</span>
-          <strong>Codex Web GPT</strong>
+          <strong>ChatGPT Web</strong>
         </div>
       </div>
       <nav class="sidebar-nav" aria-label="Workspace">
         <section class="sidebar-group">
           <h2>Workspace</h2>
           <button id="nav-browser" class="sidebar-item" data-surface="browser"><span class="nav-icon" aria-hidden="true">▣</span><span>Browser</span><i id="browser-badge" class="sidebar-item-badge"></i></button>
-          <button id="nav-astra" class="sidebar-item" data-surface="astra"><span class="nav-icon" aria-hidden="true">◇</span><span>Astra Jev</span></button>
         </section>
         <section class="sidebar-group">
           <h2>Configuration</h2>
@@ -70,25 +69,18 @@
       </div>
     </section>
 
-    <section id="surface-astra" class="surface content-surface" hidden>
-      <div class="content-scroll">
-        <header class="surface-header"><span>Optional native route</span><h1>Astra Jev</h1><p>Adaptive reasoning is a separate native route. Its request identity and one-use forwarding lease are retained independently of webpage tasks.</p></header>
-        <div id="astra-card" class="info-card"></div>
-      </div>
-    </section>
-
     <section id="surface-setup" class="surface content-surface" hidden>
       <div class="content-scroll">
-        <header class="surface-header"><span>Required</span><h1>Setup</h1><p>Connect the retained ChatGPT browser, start the checked Bend runtime, and install the isolated Codex model profile.</p></header>
+        <header class="surface-header"><span>Required</span><h1>Setup</h1><p>Connect the retained ChatGPT browser, start the checked Bend runtime, and connect a caller using ChatGPT Web API v1.</p></header>
         <div class="section-heading"><span>Core setup</span></div>
         <div class="setup-list">
           <div id="setup-chatgpt" class="setup-row"><span class="setup-index">1</span><div><strong>ChatGPT account</strong><p>Open ChatGPT in the embedded browser and sign in there. The desktop keeps its own persistent browser identity.</p></div><div class="setup-actions"><button id="setup-open" class="button-secondary">Open ChatGPT</button></div></div>
           <div id="setup-runtime" class="setup-row"><span class="setup-index">2</span><div><strong>Checked runtime</strong><p>Run the Bend-backed local service. Restarting it never resubmits an existing webpage operation.</p></div><div class="setup-actions"><button id="setup-runtime-action" class="button-secondary">Restart runtime</button></div></div>
-          <div id="setup-codex" class="setup-row"><span class="setup-index">3</span><div><strong>Codex model profile</strong><p>Install or repair the isolated <code>web</code> profile without replacing unrelated Codex configuration.</p></div><div class="setup-actions"><button id="setup-install" class="button-primary">Install models</button></div></div>
+          <div class="setup-row"><span class="setup-index">3</span><div><strong>Caller API</strong><p>Use <code>POST /v1/responses</code> with an <code>Idempotency-Key</code>. Continue a conversation by passing its <code>previous_response_id</code>. Read the request schema at <code>GET /v1/schema</code>.</p></div></div>
         </div>
         <div id="setup-message" class="notice-row" hidden></div>
         <div class="section-heading is-spaced"><span>MCP</span><small>Optional</small></div>
-        <button id="setup-mcp" class="next-surface-row"><span class="nav-icon">⌘</span><span><strong>Codex Native2</strong><small>Connect ChatGPT tool calls to the active outer Codex turn.</small></span><em>Configure MCP</em><b>›</b></button>
+        <button id="setup-mcp" class="next-surface-row"><span class="nav-icon">⌘</span><span><strong>ChatGPT Web Tools</strong><small>Connect ChatGPT tool calls to the active caller request.</small></span><em>Configure MCP</em><b>›</b></button>
       </div>
     </section>
 
@@ -102,7 +94,7 @@
         </div>
         <div class="mcp-stage">
           <section class="wizard-content" data-step-panel="0">
-            <header><span>01</span><div><h2>Enable full mode</h2><p>Full mode exposes the six Codex Native2 tools. Browser-only keeps the webpage isolated from the native tool executor.</p></div></header>
+            <header><span>01</span><div><h2>Enable full mode</h2><p>Full mode exposes the two ChatGPT Web Tools tools. Browser-only keeps the webpage isolated from the caller tool executor.</p></div></header>
             <div id="mcp-mode-notice" class="notice-row"></div>
             <div class="inline-actions"><button id="mcp-enable-full" class="button-secondary">Enable full mode</button><button id="mcp-restart" class="button-primary">Restart runtime</button></div>
           </section>
@@ -114,7 +106,7 @@
           </section>
           <section class="wizard-content" data-step-panel="2" hidden>
             <header><span>03</span><div><h2>Use the connector</h2><p>Keep the tunnel process running and enable the matching connector in ChatGPT. A disconnected transport does not cancel a task.</p></div></header>
-            <div class="connector-name"><span>Connector</span><code id="connector-name">Codex Native2</code></div>
+            <div class="connector-name"><span>Connector</span><code id="connector-name">ChatGPT Web Tools</code></div>
             <pre id="connector-address" class="connector-address"></pre>
             <div class="inline-actions"><button id="mcp-tunnel-toggle" class="button-primary">Start tunnel</button></div>
           </section>
@@ -136,7 +128,7 @@
         <header class="surface-header"><h1>Settings</h1></header>
         <div class="section-heading"><span>General</span></div>
         <div class="settings-list">
-          <label class="setting-row"><span><strong>Integration mode</strong><p>Browser-only keeps native tools disabled. Full exposes Codex Native2 through MCP.</p></span><select id="settings-mode"><option value="browser-only">Browser-only</option><option value="full">Full</option></select></label>
+          <label class="setting-row"><span><strong>Integration mode</strong><p>Browser-only keeps caller tools disabled. Full exposes ChatGPT Web Tools through MCP.</p></span><select id="settings-mode"><option value="browser-only">Browser-only</option><option value="full">Full</option></select></label>
           <div class="setting-row effort-row"><span><strong>Web reasoning controls</strong><p>Expose only controls available to the ChatGPT account you intend to use.</p></span><div id="effort-options" class="effort-options"></div></div>
         </div>
         <div class="settings-actions"><button id="settings-save" class="button-primary">Save settings</button><span id="settings-save-state"></span></div>
@@ -145,7 +137,7 @@
         <button id="settings-restart" class="diagnostic-row"><span class="nav-icon">↻</span><span><strong>Restart runtime</strong><small>Explicitly restart the observation service; existing operations are never resent</small></span><b>›</b></button>
         <button id="settings-quit" class="diagnostic-row"><span class="nav-icon">×</span><span><strong>Quit application</strong><small>Close browser pages after confirmation</small></span><b>›</b></button>
         <pre id="doctor-output" class="doctor-output" hidden></pre>
-        <div class="about-row"><span class="brand-mark">✣</span><span><strong>Codex Web GPT</strong><small id="about-version"></small></span></div>
+        <div class="about-row"><span class="brand-mark">✣</span><span><strong>ChatGPT Web</strong><small id="about-version"></small></span></div>
       </div>
     </section>
   </main>
