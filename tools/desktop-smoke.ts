@@ -63,10 +63,10 @@ try {
   const response = await result;
   assert.equal(response.status, 200);
   assert.equal((await response.json() as any).output[0].content[0].text, "Packaged runtime completed");
-  const dashboard = browser.contexts().flatMap(c => c.pages()).find(p => p.url().startsWith(`http://127.0.0.1:${service.port}/`))!;
-  await dashboard.waitForFunction(() => document.getElementById("connection")?.textContent?.startsWith("Connected"));
-  await dashboard.getByRole("button", { name: "Refresh status", exact: true }).click();
-  await dashboard.waitForFunction(() => document.querySelectorAll("#operations article").length === 1);
+  const shell = application.windows().find(p => p.url().endsWith("shell.html"))!;
+  await shell.getByRole("button", { name: "Activity", exact: true }).click();
+  await shell.getByRole("button", { name: "Refresh", exact: true }).click();
+  await shell.waitForFunction(() => document.querySelectorAll("#activity-table .activity-row").length === 1);
   mkdirSync(join(root, ".build/evidence"), { recursive: true });
   const screenshot = await application.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows()[0]!.capturePage()).toPNG().toString("base64"));
   await Bun.write(join(root, ".build/evidence/packaged-desktop.png"), Buffer.from(screenshot, "base64"));

@@ -1,2 +1,157 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'"><title>Codex Web</title><link rel="stylesheet" href="shell.css"></head><body>
-<nav><button id="home">Application</button><div id="tabs"></div><button id="login">+ ChatGPT</button><button id="restart">Restart observation service</button><button id="quit">Quit</button></nav><p id="error"></p><script src="shell.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codex Web GPT</title>
+  <link rel="stylesheet" href="shell.css">
+</head>
+<body>
+<div id="app" class="app-shell is-sidebar-open">
+  <header class="app-titlebar draggable">
+    <div class="titlebar-left no-drag">
+      <button id="sidebar-toggle" class="icon-button" aria-label="Hide sidebar" title="Hide sidebar"><span class="icon">☰</span></button>
+    </div>
+  </header>
+
+  <aside class="app-sidebar">
+    <div class="sidebar-content">
+      <div class="sidebar-brand-row">
+        <div class="sidebar-brand-identity">
+          <span class="brand-mark" aria-hidden="true">✣</span>
+          <strong>Codex Web GPT</strong>
+        </div>
+      </div>
+      <nav class="sidebar-nav" aria-label="Workspace">
+        <section class="sidebar-group">
+          <h2>Workspace</h2>
+          <button id="nav-browser" class="sidebar-item" data-surface="browser"><span class="nav-icon" aria-hidden="true">▣</span><span>Browser</span><i id="browser-badge" class="sidebar-item-badge"></i></button>
+          <button id="nav-astra" class="sidebar-item" data-surface="astra"><span class="nav-icon" aria-hidden="true">◇</span><span>Astra Jev</span></button>
+        </section>
+        <section class="sidebar-group">
+          <h2>Configuration</h2>
+          <button id="nav-setup" class="sidebar-item" data-surface="setup"><span class="nav-icon" aria-hidden="true">✓</span><span>Setup</span><i id="setup-badge" class="sidebar-item-badge"></i></button>
+          <button id="nav-mcp" class="sidebar-item" data-surface="mcp"><span class="nav-icon" aria-hidden="true">⌘</span><span>MCP</span><i id="mcp-badge" class="sidebar-item-badge"></i></button>
+        </section>
+        <section class="sidebar-group">
+          <h2>Runtime</h2>
+          <button id="nav-activity" class="sidebar-item" data-surface="activity"><span class="nav-icon" aria-hidden="true">≋</span><span>Activity</span><i id="activity-count" class="count-badge" aria-hidden="true"></i></button>
+        </section>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="nav-settings" class="sidebar-item" data-surface="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>Settings</span></button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="workspace">
+    <section id="surface-browser" class="surface browser-surface">
+      <div class="browser-tab-strip no-drag">
+        <div id="browser-tabs" class="browser-tabs"></div>
+        <button id="new-tab" class="tab-new" aria-label="New ChatGPT tab" title="New ChatGPT tab">＋</button>
+      </div>
+      <div class="browser-toolbar no-drag">
+        <button id="browser-back" class="icon-button" title="Back">←</button>
+        <button id="browser-forward" class="icon-button" title="Forward">→</button>
+        <button id="browser-reload" class="icon-button" title="Reload this page">↻</button>
+        <div id="browser-location" class="browser-location">No ChatGPT page open</div>
+        <button id="browser-zoom-out" class="icon-button" title="Zoom out">−</button>
+        <button id="browser-zoom-reset" class="zoom-reset" title="Reset zoom">100%</button>
+        <button id="browser-zoom-in" class="icon-button" title="Zoom in">＋</button>
+      </div>
+      <div id="browser-slot" class="browser-slot">
+        <div id="browser-empty" class="browser-empty">
+          <span class="brand-mark large">✣</span>
+          <h1>ChatGPT</h1>
+          <p>Sign in and keep the webpage conversation visible here. Detection failures never trigger an automatic reload or resend.</p>
+          <button id="browser-open" class="button-primary">Open ChatGPT</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="surface-astra" class="surface content-surface" hidden>
+      <div class="content-scroll">
+        <header class="surface-header"><span>Optional native route</span><h1>Astra Jev</h1><p>Adaptive reasoning is a separate native route. Its request identity and one-use forwarding lease are retained independently of webpage tasks.</p></header>
+        <div id="astra-card" class="info-card"></div>
+      </div>
+    </section>
+
+    <section id="surface-setup" class="surface content-surface" hidden>
+      <div class="content-scroll">
+        <header class="surface-header"><span>Required</span><h1>Setup</h1><p>Connect the retained ChatGPT browser, start the checked Bend runtime, and install the isolated Codex model profile.</p></header>
+        <div class="section-heading"><span>Core setup</span></div>
+        <div class="setup-list">
+          <div id="setup-chatgpt" class="setup-row"><span class="setup-index">1</span><div><strong>ChatGPT account</strong><p>Open ChatGPT in the embedded browser and sign in there. The desktop keeps its own persistent browser identity.</p></div><div class="setup-actions"><button id="setup-open" class="button-secondary">Open ChatGPT</button></div></div>
+          <div id="setup-runtime" class="setup-row"><span class="setup-index">2</span><div><strong>Checked runtime</strong><p>Run the Bend-backed local service. Restarting it never resubmits an existing webpage operation.</p></div><div class="setup-actions"><button id="setup-runtime-action" class="button-secondary">Restart runtime</button></div></div>
+          <div id="setup-codex" class="setup-row"><span class="setup-index">3</span><div><strong>Codex model profile</strong><p>Install or repair the isolated <code>web</code> profile without replacing unrelated Codex configuration.</p></div><div class="setup-actions"><button id="setup-install" class="button-primary">Install models</button></div></div>
+        </div>
+        <div id="setup-message" class="notice-row" hidden></div>
+        <div class="section-heading is-spaced"><span>MCP</span><small>Optional</small></div>
+        <button id="setup-mcp" class="next-surface-row"><span class="nav-icon">⌘</span><span><strong>Codex Native2</strong><small>Connect ChatGPT tool calls to the active outer Codex turn.</small></span><em>Configure MCP</em><b>›</b></button>
+      </div>
+    </section>
+
+    <section id="surface-mcp" class="surface content-surface" hidden>
+      <div class="content-scroll is-fit">
+        <header class="surface-header"><h1>MCP</h1><p>Connect the checked application's stdio MCP adapter through your tunnel. Tool authority comes from the active turn capability.</p></header>
+        <div class="wizard-stepper" aria-label="MCP setup">
+          <button class="is-active" data-step="0"><span>1</span><em>Full mode</em></button>
+          <button data-step="1"><span>2</span><em>Tunnel</em></button>
+          <button data-step="2"><span>3</span><em>Connector</em></button>
+        </div>
+        <div class="mcp-stage">
+          <section class="wizard-content" data-step-panel="0">
+            <header><span>01</span><div><h2>Enable full mode</h2><p>Full mode exposes the six Codex Native2 tools. Browser-only keeps the webpage isolated from the native tool executor.</p></div></header>
+            <div id="mcp-mode-notice" class="notice-row"></div>
+            <div class="inline-actions"><button id="mcp-enable-full" class="button-secondary">Enable full mode</button><button id="mcp-restart" class="button-primary">Restart runtime</button></div>
+          </section>
+          <section class="wizard-content" data-step-panel="1" hidden>
+            <header><span>02</span><div><h2>Connect tunnel runtime</h2><p>Enter the tunnel identity, then choose the runtime key file. Key contents never enter the UI or application configuration.</p></div></header>
+            <div class="field-list"><label class="field-row"><span>Tunnel ID</span><input id="tunnel-id" placeholder="tunnel_…" spellcheck="false"></label></div>
+            <div class="inline-actions"><button id="mcp-connect-tunnel" class="button-primary">Choose key file & connect</button></div>
+            <div id="mcp-tunnel-message" class="notice-row" hidden></div>
+          </section>
+          <section class="wizard-content" data-step-panel="2" hidden>
+            <header><span>03</span><div><h2>Use the connector</h2><p>Keep the tunnel process running and enable the matching connector in ChatGPT. A disconnected transport does not cancel a task.</p></div></header>
+            <div class="connector-name"><span>Connector</span><code id="connector-name">Codex Native2</code></div>
+            <pre id="connector-address" class="connector-address"></pre>
+            <div class="inline-actions"><button id="mcp-tunnel-toggle" class="button-primary">Start tunnel</button></div>
+          </section>
+        </div>
+        <div class="wizard-footer"><button id="mcp-previous" class="text-button">Previous</button><button id="mcp-next" class="button-primary">Next</button></div>
+      </div>
+    </section>
+
+    <section id="surface-activity" class="surface content-surface" hidden>
+      <div class="content-scroll">
+        <header class="surface-header"><h1>Activity</h1><p>Durable operations and their current phases. Resume observes the original page; Cancel is the explicit operation that may request Stop.</p></header>
+        <div class="section-heading activity-heading"><span>Recent activity</span><button id="activity-refresh" class="button-secondary">Refresh</button></div>
+        <div id="activity-table" class="activity-table"></div>
+      </div>
+    </section>
+
+    <section id="surface-settings" class="surface content-surface" hidden>
+      <div class="content-scroll is-narrow">
+        <header class="surface-header"><h1>Settings</h1></header>
+        <div class="section-heading"><span>General</span></div>
+        <div class="settings-list">
+          <label class="setting-row"><span><strong>Integration mode</strong><p>Browser-only keeps native tools disabled. Full exposes Codex Native2 through MCP.</p></span><select id="settings-mode"><option value="browser-only">Browser-only</option><option value="full">Full</option></select></label>
+          <div class="setting-row effort-row"><span><strong>Web reasoning controls</strong><p>Expose only controls available to the ChatGPT account you intend to use.</p></span><div id="effort-options" class="effort-options"></div></div>
+        </div>
+        <div class="settings-actions"><button id="settings-save" class="button-primary">Save settings</button><span id="settings-save-state"></span></div>
+        <div class="section-heading is-spaced"><span>Diagnostics</span></div>
+        <button id="settings-doctor" class="diagnostic-row"><span class="nav-icon">≋</span><span><strong>Run doctor</strong><small>Read-only runtime and browser reachability checks</small></span><b>›</b></button>
+        <button id="settings-restart" class="diagnostic-row"><span class="nav-icon">↻</span><span><strong>Restart runtime</strong><small>Explicitly restart the observation service; existing operations are never resent</small></span><b>›</b></button>
+        <button id="settings-quit" class="diagnostic-row"><span class="nav-icon">×</span><span><strong>Quit application</strong><small>Close browser pages after confirmation</small></span><b>›</b></button>
+        <pre id="doctor-output" class="doctor-output" hidden></pre>
+        <div class="about-row"><span class="brand-mark">✣</span><span><strong>Codex Web GPT</strong><small id="about-version"></small></span></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="error-toast" class="error-toast" hidden><i class="state-dot is-error"></i><span><strong>Error</strong><p id="error-message"></p></span><button id="error-dismiss">Dismiss</button></div>
+</div>
+<script src="shell.js"></script>
+</body>
+</html>

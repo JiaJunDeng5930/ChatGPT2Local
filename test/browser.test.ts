@@ -58,13 +58,19 @@ afterAll(async () => {
 });
 
 describe("real Electron DOM, input, identity, and at-most-once activation", () => {
-  test("desktop boots the new runtime and serves the protected dashboard", async () => {
+  test("desktop boots the new runtime with the retained launcher information architecture", async () => {
     const service = JSON.parse(readFileSync(join(home, "service.json"), "utf8"));
     const response = await fetch(`http://127.0.0.1:${service.port}/health`);
     expect(response.ok).toBe(true);
     expect((await response.json() as any).version).toBe("6.0.0");
     const windows = electron.windows();
-    expect(windows.some(page => page.url().endsWith("shell.html"))).toBe(true);
+    const shell = windows.find(page => page.url().endsWith("shell.html"));
+    expect(shell).toBeTruthy();
+    expect(await shell!.getByRole("button", { name: "Browser", exact: true }).count()).toBe(1);
+    expect(await shell!.getByRole("button", { name: "Setup", exact: true }).count()).toBe(1);
+    expect(await shell!.getByRole("button", { name: "MCP", exact: true }).count()).toBe(1);
+    expect(await shell!.getByRole("button", { name: "Activity", exact: true }).count()).toBe(1);
+    expect(await shell!.getByRole("button", { name: "Settings", exact: true }).count()).toBe(1);
   });
 
   test("prepared text survives the real editor and one click is never activated twice", async () => {
@@ -180,14 +186,12 @@ describe("real Electron DOM, input, identity, and at-most-once activation", () =
     await owned!.evaluate(() => (window as any).fixture.finish("Second owned answer"));
     expect((await (await second).json() as any).output[0].content[0].text).toBe("Second owned answer");
     const shell = electron.windows().find(page => page.url().endsWith("shell.html"))!;
-    await shell.evaluate(() => (window as any).desktop.command({ action: "select", id: "home" }));
-    const dashboard = connection.contexts().flatMap(c => c.pages()).find(p => p.url().startsWith(`http://127.0.0.1:${service.port}/`))!;
-    await dashboard.waitForFunction(() => document.getElementById("connection")?.textContent?.startsWith("Connected"));
-    await dashboard.getByRole("button", { name: "Refresh status", exact: true }).click();
-    await dashboard.waitForFunction(() => document.querySelectorAll("#operations article").length === 2);
+    await shell.getByRole("button", { name: "Activity", exact: true }).click();
+    await shell.getByRole("button", { name: "Refresh", exact: true }).click();
+    await shell.waitForFunction(() => document.querySelectorAll("#activity-table .activity-row").length === 2);
     await Bun.sleep(100);
     mkdirSync(join(root, ".build/evidence"), { recursive: true });
     const image = await electron.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows()[0]!.capturePage()).toPNG().toString("base64"));
     await Bun.write(join(root, ".build/evidence/desktop.png"), Buffer.from(image, "base64"));
-  }, 20000);
+  }, 30000);
 });
