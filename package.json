@@ -1,8 +1,8 @@
 {
   "name": "codex-chatgpt-web",
-  "version": "6.0.0",
+  "version": "7.0.0",
   "private": true,
-  "description": "A checked Bend application for retained ChatGPT webpages and native Codex tools",
+  "description": "A checked Bend application for retained ChatGPT webpages and an explicit caller API",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/JiaJunDeng5930/ChatGPT2Local.git"
@@ -27,7 +27,6 @@
     "setup": "bun runtime/cli.ts setup",
     "doctor": "bun runtime/cli.ts doctor",
     "migrate": "bun runtime/cli.ts migrate",
-    "install-models": "bun runtime/cli.ts install-models",
     "app": "bun runtime/cli.ts desktop",
     "dev:app": "bun runtime/cli.ts dev desktop",
     "dev:chat": "bun runtime/cli.ts dev chat",
@@ -66,9 +65,8 @@
     "fast-uri": "3.1.6"
   },
   "keywords": [
-    "codex",
     "chatgpt",
-    "responses-api",
+    "webpage-api",
     "mcp",
     "playwright"
   ],

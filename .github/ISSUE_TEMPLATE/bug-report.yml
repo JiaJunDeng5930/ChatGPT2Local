@@ -1,5 +1,5 @@
 name: Bug report
-description: Report one reproducible Codex Web GPT failure with fresh privacy-safe diagnostics.
+description: Report one reproducible ChatGPT Web failure with fresh privacy-safe diagnostics.
 title: "[Bug] "
 labels:
   - bug
@@ -8,23 +8,23 @@ body:
     attributes:
       value: |
         Please read [Troubleshooting](https://github.com/JiaJunDeng5930/ChatGPT2Local/blob/main/TROUBLESHOOTING.md), run `doctor`, and reproduce the failure once before filing.
-        Never upload cookies, browser storage, API keys, Tunnel IDs, `application.sqlite`, the desktop profile, turn capabilities, or unredacted Codex prompts/tool output.
+        Never upload cookies, browser storage, API keys, Tunnel IDs, `application.sqlite`, the desktop profile, turn capabilities, or unredacted caller prompts/tool output.
 
   - type: input
     id: application-version
     attributes:
-      label: Codex Web GPT version
+      label: ChatGPT Web version
       description: Use `codex-chatgpt-web --version` or the version of the packaged desktop, not "latest".
       placeholder: x.y.z
     validations:
       required: true
 
   - type: input
-    id: codex-version
+    id: caller-version
     attributes:
-      label: Codex version
-      description: Include Codex Desktop and/or `codex --version`, whichever reproduces the failure.
-      placeholder: Codex Desktop … / codex-cli …
+      label: Caller and API version
+      description: Include the caller name/version and the ChatGPT Web API protocol version.
+      placeholder: my-client 1.0 / chatgpt-web.v1
     validations:
       required: true
 
@@ -77,7 +77,7 @@ body:
     id: model
     attributes:
       label: Selected model
-      description: Use the exact Codex model-picker name. Write "not applicable" for setup failures.
+      description: Use the exact ChatGPT Web API model ID. Write "not applicable" for setup failures.
       placeholder: ChatGPT Web — High
     validations:
       required: true
@@ -94,7 +94,7 @@ body:
     id: reproduction
     attributes:
       label: Minimal reproduction
-      description: Number the smallest reliable sequence starting from a fresh Codex task or application state.
+      description: Number the smallest reliable sequence starting from a fresh explicitly identified API request or application state.
       placeholder: |
         1. …
         2. …
@@ -126,7 +126,7 @@ body:
       options:
         - label: I tested the current release and ran `doctor` before reproducing the failure once.
           required: true
-        - label: I stated whether the failure also occurs in a fresh Codex task, or explained why that does not apply.
+        - label: I stated whether the failure also occurs in a fresh explicitly identified API request, or explained why that does not apply.
           required: true
         - label: I included only sanitized diagnostics and did not attach the application database, browser profile, credentials, capabilities, prompts, or private tool output.
           required: true

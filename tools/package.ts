@@ -45,7 +45,7 @@ try {
   cpSync(join(root, ".build/bend-core"), join(staging, "bend-core"));
   cpSync(join(root, "LICENSE"), join(staging, "LICENSE"));
   cpSync(join(root, "LICENSES"), join(staging, "LICENSES"), { recursive: true });
-  let notices = "Codex Web · Bend — third-party runtime notices\n\n";
+  let notices = "ChatGPT Web · Bend — third-party runtime notices\n\n";
   // Runtime dependencies are bundled into cli.js. Read their installed source
   // trees only to produce provenance and license evidence; no node_modules
   // directory is part of the release artifact. This matters for Electron,

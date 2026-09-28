@@ -1,121 +1,53 @@
 # Troubleshooting
 
-This guide matches the Bend-based runtime and desktop application in version 6. It deliberately avoids recovery steps that can create a second webpage submission.
+Run `bun runtime/cli.ts doctor --home <profile>` and inspect the desktop Activity page. Keep the original request body, idempotency key and response ID. Do not delete ownership records, repeat a task under a new key, or reload the page to repair an unknown result.
 
-## Start with read-only diagnostics
+## API request rejected
 
-Run the application diagnostics before changing configuration or retrying a task:
+`idempotency_key_required` means the POST lacks its request key. Give each new logical request a unique `Idempotency-Key`; retry the same logical request with its original key and body.
 
-```sh
-bun runtime/cli.ts doctor
-bun runtime/cli.ts status
-```
+`idempotency_conflict` means that key was already used for different content. Recover the original request rather than guessing that it was never sent. Only `stream` can change on a retry; see the normalization rules in [the protocol](docs/protocol.md).
 
-`doctor` checks configuration, the local service, and browser reachability without sending, reloading, stopping, or retrying a webpage. `status` reports durable operation state. Keep `~/.codex-chatgpt-web/application.json`, `application.sqlite`, the desktop browser profile, turn capabilities, cookies, API keys, Tunnel IDs, prompts, and private tool output out of public bug reports.
+`invalid_request` usually means a field is not part of this API. Read `GET /v1/schema`. Codex metadata, provider-native model names, `reasoning` overrides, and full-history compatibility fields are not accepted. A continuation supplies only `previous_response_id`, `input`, and optionally `stream`.
 
-## Models do not appear in Codex
+`previous_response_pending` means the previous request has not returned a committed tool-call batch or final answer. Observe it through its original POST/key or `GET /v1/responses/{id}` first.
 
-Install the isolated model profile, then launch Codex with that profile:
+`previous_response_consumed` means another request already continues this response. Retry that successor with its own original key. Creating a second successor is not a retry or a branch operation.
 
-```sh
-bun run install-models
-codex --profile web
-```
+`previous_response_not_found` means the ID is absent from this profile's new-protocol request records. Verify the profile and API version. Old compatible-provider IDs are not converted during migration.
 
-The installer preserves unrelated Codex configuration. If Codex was already running, restart that Codex process so it reloads its model catalog. The configured ChatGPT account must expose the effort selected by the profile; an unsupported or ambiguous effort is rejected before webpage submission.
+`previous_response_unavailable` means the original page, document, final answer or ownership changed. Inspect that page. The application will not create a replacement conversation. A new root is a separate caller decision and requires explicit context.
 
-## ChatGPT sign-in is missing
+`message_too_large` rejects the whole prompt before admission. Shorten the input or stage it through explicit requests. The application does not split, summarize, truncate or silently omit content. Token budgets are local estimates, not provider context-window measurements.
 
-Open the desktop application and use **Open ChatGPT / sign in**. Sign in inside the embedded browser. Version 6 keeps that browser identity in its own persistent desktop profile and does not import Chrome cookies.
+## Tools do not run
 
-If the page cannot be reached, run `doctor`. Do not delete the profile merely to force another task submission; browser identity and durable operation identity are separate concerns.
+Use `full` mode, restart the service after configuration changes, and connect **ChatGPT Web Tools**. The connector has only `web_tool_list` and `web_tool_call`. Every call must carry the current turn capability, and requested tool names must match the caller's root declarations exactly.
 
-## A task becomes uncertain or observation fails
+The service does not execute a shell tool by itself. The caller receives `requires_action`, applies its own permissions, and returns the complete result batch. `tool_results_required` rejects a new message while calls are pending. `tool_results_mismatch` rejects partial, duplicate, foreign or incorrectly typed call IDs. Function and custom results use distinct item types.
 
-An observation failure does not prove that the webpage failed. The runtime therefore leaves the original page running and pauses that observer. It does not reload, regenerate, stop, allocate a replacement page, or resend the request.
+An MCP `content` result is an explicit object containing supported text/image blocks. Strings are always plain text, even when they look like JSON. No Codex gateway or namespace lookup is available.
 
-Inspect the original page, then resume observation explicitly:
+## Observation interrupted or transport disconnected
 
-```sh
-bun runtime/cli.ts resume OPERATION_ID
-```
+A disconnected JSON/SSE subscriber does not stop the page. Repeat the same request/key or retrieve its resource to observe the retained result. Streaming text snapshots are provisional; only the terminal response is a committed answer or tool-call batch.
 
-If a tool completed while the page could not be observed, inspect the current answer and explicitly attest that it is the completed answer before allowing completion detection to continue:
+An observation failure pauses reads and records a fault. Inspect the original page, then call `POST /v1/responses/{id}/resume` with `{}`. This only reattaches observation. It cannot repair a missing document or authorize a new Send.
 
-```sh
-bun runtime/cli.ts resume OPERATION_ID --confirm
-```
+When a tool completed while the page could not be observed, the service requires explicit confirmation before accepting its current answer. Only after reviewing the actual page and tool results, call resume with `{"confirm":true}`. Do not automate that confirmation as a generic retry handler.
 
-If the recorded original document no longer exists, resume fails. Creating a fresh page is not a recovery action for that operation.
+To stop the owning webpage turn, call `POST /v1/responses/{id}/cancel` with `{}` or use the desktop's explicit cancel action. Earlier committed response resources remain immutable after this action. Its acknowledgement means the Stop request was handled locally, not that remote execution is proved to have stopped.
 
-## Cancel a task
+## Upgrade or ownership failure
 
-Cancellation is an explicit user command:
+Stop the old runtime before running `bun runtime/cli.ts migrate --home <profile>`. Migration takes exclusive ownership, preserves the database and browser data, and saves changed old configuration in `application.json.before-v7`. Removed native/advisor settings otherwise fail configuration validation rather than being silently used.
 
-```sh
-bun runtime/cli.ts cancel OPERATION_ID
-```
+Historical operations remain available for inspection and explicit cancellation. They do not become new-protocol requests, and their old response IDs cannot be continued. Establish a new root with caller-supplied context when ready.
 
-Only the recorded owned page may receive the Stop action. Transport disconnects, HTTP/SSE cancellation, process restart, DOM read failures, error-looking pages, and runtime recovery do not authorize cancellation.
+An unresolved older submission journal may deliberately block new sends. Inspect and resolve its exact ownership mapping with the migration command rather than deleting the journal. A stale or uncertain effect is not evidence that no message was submitted.
 
-## A repeated request appears after a disconnect
+## Browser and platform evidence
 
-The same native turn identity or `Idempotency-Key` attaches to the durable operation. A physical send is claimed in SQLite before browser activation. If execution was claimed and its receipt was lost, the state remains unknown; the runtime does not issue another send.
+The fixture suite runs actual Electron and the production browser adapter against a local page. It validates the boundary implementation without consuming account quota. It does not certify the current DOM, account entitlements, connector availability or remote execution behavior of a logged-in ChatGPT account.
 
-Use `status` to inspect the existing operation. Do not change its identity to force a new request.
-
-## Conversation history is not reused
-
-A retained ChatGPT page is reusable only when its recorded page and document still match, the previous assistant answer is still the tail, the interpretation environment agrees, and the incoming transcript is a compatible extension of the recorded history. Edited, branched, shortened, manually extended, or missing pages are not treated as equivalent API history.
-
-A new genuine operation may use a new page. An uncertain existing operation keeps ownership of its original page and is never replaced automatically.
-
-## Full mode or Codex Native2 tools do not connect
-
-Set `mode` to `full` in the private application configuration, restart the service explicitly, and connect the ChatGPT connector named by that configuration. If using the OpenAI tunnel client, configure and run it explicitly:
-
-```sh
-bun runtime/cli.ts tunnel-connect --key-file /private/path/to/key --tunnel-id TUNNEL_ID
-bun runtime/cli.ts tunnel-run
-```
-
-The runtime does not restart the tunnel automatically. Native tools execute in the outer Codex runtime under its own approval and sandbox policy; the webpage bridge does not execute shell commands itself.
-
-## Migration blocks new work
-
-Run:
-
-```sh
-bun runtime/cli.ts migrate
-```
-
-Legacy ownership receipts continue to block duplicate sends. If migration reports an `unmapped:...` identity, inspect the original receipt and map it only when the exact native identity is known:
-
-```sh
-bun runtime/cli.ts migrate unmapped:JOURNAL_ID native:SHA256_ID
-```
-
-Deleting an unknown record to make the operation fresh defeats the at-most-once boundary and is not a supported recovery method.
-
-## Development or packaged application failure
-
-Run the fresh verification gate:
-
-```sh
-bun run verify
-```
-
-For a desktop delivery change, also build and smoke-test the actual platform directory package:
-
-```sh
-bun run app:package:dir
-bun run app:smoke
-```
-
-`verify` checks the Bend proof closure, semantic mutations, TypeScript, SQLite/process/HTTP/MCP boundaries, a real local Electron fixture, a relocated standalone runtime bundle, and a fresh Bend build. Local fixtures do not certify the current live ChatGPT DOM, another operating system, Apple notarization, or a real account tier.
-
-## Report a bug
-
-Include the application version, Codex version, operating system, account tier, integration mode, exact selected model, minimal reproduction, complete final error, sanitized `doctor` output, and the relevant operation phase or fault code from `status`. State whether the same problem occurs in a fresh Codex task.
-
-Do not attach the application database, browser profile, cookies, authorization headers, API keys, Tunnel IDs, turn capabilities, full prompts, or private native tool output. For execution-authority or capability-leakage issues, use the private security-reporting channel described in `SECURITY.md`.
+Changed or ambiguous model controls fail instead of selecting a fallback effort. Collect a minimal, sanitized reproduction before changing selectors. Report the application version, caller/API version, OS, selected effort, mode and error category. Never upload cookies, tokens, raw task/tool text, `application.sqlite`, browser profiles or ownership capabilities.

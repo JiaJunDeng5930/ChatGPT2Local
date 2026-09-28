@@ -182,10 +182,10 @@ export class WebBrowser implements Browser {
   }
 
   private async selectConnector(page: Page): Promise<void> {
-    const name = this.config.connectorName ?? "Codex Native2";
+    const name = this.config.connectorName ?? "ChatGPT Web Tools";
     const composer = page.locator(DOM.composer).filter({ visible: true });
     if ((await composer.innerText()).trim()) throw new Error("Connector selection cannot overwrite user text");
-    await composer.pressSequentially("@codex", { delay: 20, timeout: this.timeout });
+    await composer.pressSequentially(`@${name}`, { delay: 20, timeout: this.timeout });
     const row = page.locator(DOM.mention).filter({ has: page.getByText(name, { exact: true }), visible: true });
     await row.waitFor({ state: "visible", timeout: this.timeout });
     if (await row.count() !== 1) throw new Error("The exact connector identity is ambiguous");
@@ -215,7 +215,7 @@ export class WebBrowser implements Browser {
         throw new Error("The retained conversation changed after admission");
     }
     const selection = await this.select(page, context);
-    if (context.mode === "full" && context.purpose === "response") await this.selectConnector(page);
+    if (context.mode === "full") await this.selectConnector(page);
     const baseline = await page.evaluate(s => [...document.querySelectorAll(s.turn)]
       .filter(node => !node.parentElement?.closest(s.turn)).map(node => ({
         id: node.getAttribute("data-turn-key") ?? node.getAttribute("data-message-id") ?? "",
@@ -224,7 +224,7 @@ export class WebBrowser implements Browser {
     if (baseline.some(e => !e.id) || new Set(baseline.map(e => e.id)).size !== baseline.length) throw new Error("Conversation has ambiguous logical identities");
     const receipt: Ownership = { operation, slot, page: previous?.page ?? randomUUID(), document: previous?.document ?? randomUUID(),
       baseline, payload, selection, activated: false, preparedText: "",
-      connector: context.mode === "full" && context.purpose === "response" ? this.config.connectorName ?? "Codex Native2" : "" };
+      connector: context.mode === "full" ? this.config.connectorName ?? "ChatGPT Web Tools" : "" };
     // This is identity evidence, never a replacement for the SQLite send claim.
     await page.evaluate(({ marker, receipt }) => { (globalThis as unknown as Record<string, Ownership>)[marker] = receipt; }, { marker: MARKER, receipt });
     this.owned.set(operation, page);

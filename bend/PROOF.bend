@@ -1,7 +1,5 @@
 import Base
 import ./turn-proof.bend as Turn
-import ./history-proof.bend as History
-import ./transcript-proof.bend as Transcript
 import ./trace-proof.bend as Trace
 import ./batch-proof.bend as Batch
 import ./observation-proof.bend as Observation
@@ -14,4 +12,4 @@ import ./lease-proof.bend as Lease
 import ./api.bend as API
 import ./native-protocol.bend as Protocol
 import ./application-proof.bend as Application
-import ./routing-proof.bend as Routing
+import ./request-proof.bend as Request

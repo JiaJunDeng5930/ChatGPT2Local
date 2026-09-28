@@ -84,13 +84,27 @@ export async function eventually(condition: () => boolean, label = "condition", 
   }
 }
 
+const requestKeys = new WeakMap<ObjectValue, string>();
+
+export function requestHeaders(body: ObjectValue, key?: string): Headers {
+  const identity = key ?? requestKeys.get(body);
+  return new Headers(identity ? { "idempotency-key": identity } : {});
+}
+
 export function requestBody(turn = "turn-one", input?: ObjectValue[], full = false): ObjectValue {
-  return { model: "chatgpt-web/medium", stream: true, instructions: "Perform the supplied task.",
-    client_metadata: { "x-codex-turn-metadata": { thread_id: "fixture-thread", turn_id: turn } },
+  const body: ObjectValue = { model: "chatgpt-web/medium", stream: true, instructions: "Perform the supplied task.",
     input: input ?? [{ type: "message", role: "user", content: [{ type: "input_text", text: "Return a result." }] }],
     tools: full ? [{ type: "function", name: "exec_command", description: "fixture execution", parameters: {
       type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"], additionalProperties: false,
     } }] : [] };
+  requestKeys.set(body, turn);
+  return body;
+}
+
+export function continuationBody(previous: string, input: string | ObjectValue[], key = `next-${previous}`): ObjectValue {
+  const body: ObjectValue = { previous_response_id: previous, input, stream: false };
+  requestKeys.set(body, key);
+  return body;
 }
 
 export function fixture(full = false) {
@@ -98,7 +112,7 @@ export function fixture(full = false) {
   const store = new Store(home);
   const browser = new FixtureBrowser();
   const app = new Application(store, browser, { ...DEFAULT_LIMITS }, 5, 0);
-  const parse = (body = requestBody("turn-one", undefined, full)) => parseRequest(body, new Headers(), full ? "full" : "browser-only", store);
+  const parse = (body = requestBody("turn-one", undefined, full), key?: string) => parseRequest(body, requestHeaders(body, key), full ? "full" : "browser-only", store);
   const close = async () => { await app.close(); store.close(); rmSync(home, { recursive: true, force: true }); };
   return { home, store, browser, app, parse, close };
 }

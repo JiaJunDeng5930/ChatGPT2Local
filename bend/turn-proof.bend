@@ -1,7 +1,6 @@
 import Base
 import ./domain.bend as D
 import ./LAWS.bend as L
-import ./history-proof.bend as HP
 
 def L.turn_refinement(s, e):
   match s:

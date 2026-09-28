@@ -39,8 +39,7 @@ else {
 
   function safeConfig() {
     return { mode: config?.mode ?? "browser-only", efforts: [...(config?.efforts ?? [])],
-      connectorName: config?.browser?.connectorName || "Codex Native2", tunnelConfigured: !!config?.tunnel,
-      jev: config?.jev ? { baseUrl: config.jev.baseUrl, model: config.jev.model, keyEnv: config.jev.keyEnv, targetModel: config.jev.targetModel } : null };
+      connectorName: config?.browser?.connectorName || "ChatGPT Web Tools", tunnelConfigured: !!config?.tunnel };
   }
   function state() {
     return { selectedTab, fault: runtimeFault, running: !!runtime && runtime.exitCode === null,
@@ -255,7 +254,6 @@ else {
       case "show-operation": await control("show", { id: String(input.id) }); return await snapshot();
       case "resume-operation": await control("resume", { id: String(input.id), ...(input.confirm === true ? { confirm: true } : {}) }); return await snapshot();
       case "cancel-operation": await control("cancel", { id: String(input.id) }); return await snapshot();
-      case "install-models": { const message = runCli(["install-models"]); return { message, snapshot: await snapshot() }; }
       case "save-settings": {
         const mode = input.mode;
         const efforts = Array.isArray(input.efforts) ? input.efforts : [];
@@ -273,7 +271,7 @@ else {
         if (typeof input.tunnelId !== "string" || !input.tunnelId.trim()) throw new Error("Tunnel ID is required");
         const picked = await dialog.showOpenDialog(window, { title: "Choose the tunnel runtime key file", properties: ["openFile"] });
         if (picked.canceled || picked.filePaths.length !== 1) return { cancelled: true, snapshot: await snapshot() };
-        const message = runCli(["tunnel-connect", "--key-file", picked.filePaths[0], "--tunnel-id", input.tunnelId.trim(), "--connector-name", "Codex Native2"]);
+        const message = runCli(["tunnel-connect", "--key-file", picked.filePaths[0], "--tunnel-id", input.tunnelId.trim(), "--connector-name", "ChatGPT Web Tools"]);
         config = JSON.parse(readFileSync(join(home, "application.json"), "utf8"));
         return { cancelled: false, message, snapshot: await snapshot() };
       }
@@ -293,7 +291,7 @@ else {
   async function quit() {
     if (quitting) return;
     const result = await dialog.showMessageBox(window, { type: "warning", buttons: ["Keep running", "Quit and close all pages"], defaultId: 0, cancelId: 0,
-      message: "Quit Codex Web?", detail: "This closes the browser. In-flight operations will be retained as unknown on next startup and will not be resent." });
+      message: "Quit ChatGPT Web?", detail: "This closes the browser. In-flight operations will be retained as unknown on next startup and will not be resent." });
     if (result.response !== 1) return;
     quitting = true;
     if (tunnel && tunnel.exitCode === null) tunnel.kill("SIGTERM");
@@ -313,7 +311,7 @@ else {
     session.fromPartition(profile).setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     session.fromPartition(profile).setPermissionCheckHandler(() => false);
     window = new BrowserWindow({ width: 1240, height: 840, minWidth: 680, minHeight: 480,
-      title: "Codex Web GPT", backgroundColor: "#181818", titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "hidden",
+      title: "ChatGPT Web", backgroundColor: "#181818", titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "hidden",
       webPreferences: { ...secure, preload: join(__dirname, "preload.cjs") } });
     window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     window.webContents.on("will-navigate", event => event.preventDefault());

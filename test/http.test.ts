@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { defaultConfig } from "../runtime/config";
 import { handler } from "../runtime/server";
-import { fixture, eventually, requestBody } from "./fixtures";
+import { fixture, eventually, requestBody, requestHeaders, continuationBody } from "./fixtures";
 import { object, canonical } from "../runtime/codec";
 import { array } from "../runtime/kernel";
 
@@ -15,17 +15,18 @@ function service(full = false) {
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, fetch: handler({ app: f.app, config, closing: closing.signal }) });
   const url = `http://127.0.0.1:${server.port}`;
   const headers = { authorization: `Bearer ${config.token}`, "content-type": "application/json" };
-  const response = (body: unknown, extra: RequestInit = {}) => fetch(`${url}/v1/responses`, { method: "POST", headers, body: JSON.stringify(body), ...extra });
+  const response = (body: unknown, extra: RequestInit = {}) => fetch(`${url}/v1/responses`, { method: "POST", body: JSON.stringify(body), ...extra,
+    headers: { ...headers, ...Object.fromEntries(requestHeaders(object(body))), ...Object.fromEntries(new Headers(extra.headers)) } });
   cleanups.push(async () => { closing.abort(); await server.stop(true); await f.close(); });
   return { ...f, config, url, headers, response };
 }
 
-describe("real HTTP/SSE and durable native MCP transport", () => {
+describe("real HTTP/SSE and durable caller-tool MCP transport", () => {
   test("HTTP admission rejects a missing identity before any browser preparation", async () => {
     const s = service();
     const response = await s.response({ model: "chatgpt-web/medium", input: "hello" });
     expect(response.status).toBe(400);
-    expect((await response.json() as any).error.code).toBe("operation_identity_required");
+    expect((await response.json() as any).error.code).toBe("idempotency_key_required");
     expect(s.browser.prepares).toHaveLength(0);
   });
 
@@ -36,7 +37,7 @@ describe("real HTTP/SSE and durable native MCP transport", () => {
     const first = await s.response(body, { signal: abort.signal });
     expect(first.headers.get("content-type")).toBe("text/event-stream");
     const reader = first.body!.getReader();
-    expect(new TextDecoder().decode((await reader.read()).value)).toContain("observing durable");
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain("response.in_progress");
     abort.abort(); await reader.cancel().catch(() => {});
     await eventually(() => s.browser.sends.length === 1);
     s.browser.finish(id, "One final receipt 😀");
@@ -47,7 +48,7 @@ describe("real HTTP/SSE and durable native MCP transport", () => {
     expect(s.browser.sends).toHaveLength(1); expect(s.browser.cancellations).toHaveLength(0);
   });
 
-  test("MCP commands traverse Responses and receive native results on the same page", async () => {
+  test("MCP calls traverse the caller API and receive results on the same page", async () => {
     const s = service(true); const body = requestBody("mcp-round", undefined, true); body.stream = false;
     const parsed = s.parse(body);
     await s.app.submit(parsed);
@@ -60,25 +61,65 @@ describe("real HTTP/SSE and durable native MCP transport", () => {
     const session = initialized.headers.get("mcp-session-id")!;
     expect(session.length).toBeGreaterThan(30);
     const discovered = await (await rpc("tools/list", 1, {}, session)).json() as any;
-    expect(discovered.result.tools.map((tool: any) => tool.name)).toContain("codex_exec");
+    expect(discovered.result.tools.map((tool: any) => tool.name)).toEqual(["web_tool_list", "web_tool_call"]);
     const token = s.store.get(parsed.id).capability;
-    const call = rpc("tools/call", 2, { name: "codex_exec", arguments: { turn_token: token, cmd: "printf native" } }, session);
+    const call = rpc("tools/call", 2, { name: "web_tool_call", arguments: { turn_token: token, name: "exec_command", arguments: { cmd: "printf native" } } }, session);
     const outgoing = await (await s.response(body)).json() as any;
     expect(outgoing.output[0].name).toBe("exec_command");
-    expect(JSON.parse(outgoing.output[0].arguments)).toEqual({ cmd: "printf native" });
-    const continued = requestBody("mcp-round", [...parsed.context.input, outgoing.output[0], {
+    expect(outgoing.output[0].arguments).toEqual({ cmd: "printf native" });
+    const continued = continuationBody(outgoing.id, [{
       type: "function_call_output", call_id: outgoing.output[0].call_id, output: "native-result",
-    }], true);
+    }]);
     continued.stream = false;
     const pending = s.response(continued);
     const receipt = await (await call).json() as any;
     expect(receipt.result.content[0].text).toBe("native-result");
-    const replay = await (await rpc("tools/call", 2, { name: "codex_exec", arguments: { turn_token: token, cmd: "printf native" } }, session)).json() as any;
+    const replay = await (await rpc("tools/call", 2, { name: "web_tool_call", arguments: { turn_token: token, name: "exec_command", arguments: { cmd: "printf native" } } }, session)).json() as any;
     expect(replay.result).toEqual(receipt.result);
     s.browser.finish(parsed.id, "Native tools finished");
     expect((await (await pending).json() as any).output.at(-1).content[0].text).toBe("Native tools finished");
     expect(array(s.store.get(parsed.id).state.broker.invocations)).toHaveLength(1);
     expect(s.browser.sends).toHaveLength(1);
+  });
+
+  test("SSE publishes replaceable provisional text before the final durable response", async () => {
+    const s = service();
+    const body = requestBody("live-snapshots");
+    const parsed = s.parse(body);
+    const response = await s.response(body);
+    expect(response.headers.get("x-response-id")).toBe(parsed.responseId);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let received = "";
+    const until = async (text: string) => {
+      while (!received.includes(text)) {
+        const part = await reader.read();
+        if (part.done) throw new Error("SSE ended before the expected event");
+        received += decoder.decode(part.value, { stream: true });
+      }
+    };
+    await until("response.in_progress");
+    await eventually(() => s.browser.sends.length === 1);
+    const page = s.browser.pages.get(parsed.id)!;
+    page.text = "Draft one, not final.";
+    page.signature = "provisional-one";
+    page.facts.present = true;
+    page.facts.has_text = true;
+    await until("Draft one, not final.");
+    expect(received).toContain("response.output_text.snapshot");
+    expect(received).toContain('"provisional":true');
+    expect(s.store.get(parsed.id).state.output.$).toBe("None");
+    page.text = "Revised 😀";
+    page.signature = "provisional-two";
+    await until("Revised 😀");
+    expect(received).not.toContain("response.completed");
+    s.browser.finish(parsed.id, "The committed final text.");
+    await until("[DONE]");
+    expect(received).toContain("response.completed");
+    expect(received).toContain("The committed final text.");
+    await reader.cancel();
+    expect(s.browser.sends).toHaveLength(1);
+    expect(s.browser.cancellations).toHaveLength(0);
   });
 
   test("wrong capabilities, wrong origins, and missing bearer tokens have no effects", async () => {
@@ -88,7 +129,7 @@ describe("real HTTP/SSE and durable native MCP transport", () => {
     const init = await fetch(`${s.url}/mcp`, { method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }) });
     const result = await fetch(`${s.url}/mcp`, { method: "POST", headers: { "content-type": "application/json", "mcp-session-id": init.headers.get("mcp-session-id")! },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "codex_exec", arguments: { turn_token: "x".repeat(40), cmd: "do-not-execute" } } }) });
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "web_tool_call", arguments: { turn_token: "x".repeat(40), name: "exec_command", arguments: { cmd: "do-not-execute" } } } }) });
     expect((await result.json() as any).result.isError).toBe(true);
     expect(s.browser.prepares).toHaveLength(0);
   });

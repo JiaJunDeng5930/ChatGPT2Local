@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:chatgpt-web:request:v1",
+  "title": "ChatGPT Web API v1 request",
+  "type": "object",
+  "required": ["input"],
+  "additionalProperties": false,
+  "properties": {
+    "model": { "enum": ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/xhigh", "chatgpt-web/pro"] },
+    "previous_response_id": { "type": ["string", "null"], "pattern": "^resp_[a-f0-9]{64}$" },
+    "stream": { "type": "boolean" },
+    "instructions": { "type": "string" },
+    "tools": { "type": "array", "maxItems": 256, "items": { "$ref": "#/definitions/tool" } },
+    "text": {
+      "type": "object", "required": ["format"], "additionalProperties": false,
+      "properties": { "format": { "$ref": "#/definitions/format" } }
+    },
+    "input": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/message" } },
+        { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/result" } }
+      ]
+    }
+  },
+  "if": { "required": ["previous_response_id"], "properties": { "previous_response_id": { "type": "string" } } },
+  "then": { "not": { "anyOf": [{ "required": ["model"] }, { "required": ["instructions"] }, { "required": ["tools"] }, { "required": ["text"] }] } },
+  "else": { "required": ["model"] },
+  "definitions": {
+    "message": {
+      "type": "object", "required": ["type", "role", "content"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "message" },
+        "role": { "enum": ["system", "developer", "user", "assistant"] },
+        "content": { "oneOf": [
+          { "type": "string", "minLength": 1 },
+          { "type": "array", "minItems": 1, "items": { "oneOf": [
+            { "type": "object", "required": ["type", "text"], "additionalProperties": false, "properties": { "type": { "const": "input_text" }, "text": { "type": "string" } } },
+            { "type": "object", "required": ["type", "image_url"], "additionalProperties": false, "properties": { "type": { "const": "input_image" }, "image_url": { "type": "string" } } }
+          ] } }
+        ] }
+      }
+    },
+    "result": {
+      "type": "object", "required": ["type", "call_id", "output"], "additionalProperties": false,
+      "properties": { "type": { "enum": ["function_call_output", "custom_tool_call_output"] }, "call_id": { "type": "string", "minLength": 1 }, "output": { "$ref": "#/definitions/toolOutput" } }
+    },
+    "toolOutput": {
+      "if": { "type": "object", "required": ["content"] },
+      "then": {
+        "type": "object", "required": ["content"], "additionalProperties": false,
+        "properties": {
+          "isError": { "type": "boolean" }, "structuredContent": { "type": "object" },
+          "content": { "type": "array", "items": { "oneOf": [
+            { "type": "object", "required": ["type", "text"], "additionalProperties": false,
+              "properties": { "type": { "const": "text" }, "text": { "type": "string" } } },
+            { "type": "object", "required": ["type", "data", "mimeType"], "additionalProperties": false,
+              "properties": { "type": { "const": "image" }, "data": { "type": "string" }, "mimeType": { "type": "string" } } }
+          ] } }
+        }
+      }
+    },
+    "tool": {
+      "oneOf": [
+        { "type": "object", "required": ["type", "name", "parameters"], "additionalProperties": false, "properties": {
+          "type": { "const": "function" }, "name": { "$ref": "#/definitions/name" }, "description": { "type": "string" }, "parameters": { "type": "object" }
+        } },
+        { "type": "object", "required": ["type", "name"], "additionalProperties": false, "properties": {
+          "type": { "const": "custom" }, "name": { "$ref": "#/definitions/name" }, "description": { "type": "string" }
+        } }
+      ]
+    },
+    "name": { "type": "string", "pattern": "^[A-Za-z0-9_$.-]{1,256}$" },
+    "format": {
+      "oneOf": [
+        { "type": "object", "required": ["type"], "additionalProperties": false, "properties": { "type": { "enum": ["text", "json_object"] } } },
+        { "type": "object", "required": ["type", "schema"], "additionalProperties": false, "properties": { "type": { "const": "json_schema" }, "schema": { "type": "object" } } }
+      ]
+    }
+  }
+}
